@@ -55,3 +55,62 @@ export const getCategories = async (req: Request, res: Response): Promise<void> 
     res.status(500).json({ success: false, message: 'Failed to fetch categories' });
   }
 };
+
+/**
+ * Crea una nueva categoría asociada a la tienda del comerciante autenticado.
+ * 
+ * Flujo:
+ * 1. Recupera la tienda asociada al comerciante actual (`req.user.id`).
+ * 2. Valida la presencia, formato y longitud máxima del nombre.
+ * 3. Genera el slug normalizado a partir del nombre ingresado.
+ * 4. Comprueba que no exista una categoría previa con el mismo slug en esta tienda (409 Conflict).
+ * 5. Registra la nueva categoría en la base de datos (201 Created).
+ */
+export const createCategory = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    // 1. Localiza la tienda perteneciente al comerciante autenticado
+    const store = await getStore(req.user!.id);
+    if (!store) {
+      res.status(404).json({ success: false, message: 'Store not found' });
+      return;
+    }
+
+    // 2. Validaciones de entrada sobre el nombre de la categoría
+    const { name } = req.body ?? {};
+    if (typeof name !== 'string' || !name.trim()) {
+      res.status(400).json({ success: false, message: 'Category name is required' });
+      return;
+    }
+    if (name.trim().length > 255) {
+      res.status(400).json({ success: false, message: 'Category name must be 255 characters or less' });
+      return;
+    }
+
+    // 3. Generación y comprobación de slug válido (requiere caracteres alfanuméricos)
+    const slug = generateSlug(name);
+    if (!slug) {
+      res.status(400).json({ success: false, message: 'Category name must contain letters or numbers' });
+      return;
+    }
+
+    // 4. Comprobación de unicidad de categoría por tienda para evitar duplicados
+    const existing = await prisma.categories.findFirst({ where: { store_id: store.id, slug } });
+    if (existing) {
+      res.status(409).json({ success: false, message: 'A category with this name already exists' });
+      return;
+    }
+
+    // 5. Creación de la categoría en base de datos
+    const category = await prisma.categories.create({
+      data: {
+        store_id: store.id,
+        name: name.trim(),
+        slug,
+      },
+    });
+    res.status(201).json({ success: true, data: category });
+  } catch (error) {
+    console.error("createCategory error:", error);
+    res.status(500).json({ success: false, message: 'Failed to create category' });
+  }
+};
