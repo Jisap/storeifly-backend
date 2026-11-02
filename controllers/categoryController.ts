@@ -115,30 +115,41 @@ export const createCategory = async (req: AuthenticatedRequest, res: Response): 
   }
 };
 
+/**
+ * Elimina una categoría asegurando pertenencia a la tienda del comerciante autenticado.
+ * 
+ * Flujo:
+ * 1. Valida que el ID de la categoría sea un entero positivo.
+ * 2. Obtiene la tienda del comerciante autenticado (`req.user.id`).
+ * 3. Ejecuta la eliminación condicionada por `id` y `store_id` (previene eliminar categorías ajenas).
+ * 4. Los productos vinculados a esta categoría se conservan (su `category_id` pasa a NULL).
+ */
 export const deleteCategory = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // 1. Validación del parámetro ID en la URL
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       res.status(400).json({ success: false, message: 'Invalid category id' });
       return;
     }
 
+    // 2. Comprobación de existencia de la tienda del comerciante
     const store = await getStore(req.user!.id);
     if (!store) {
       res.status(404).json({ success: false, message: 'Store not found' });
       return;
     }
 
-    // Only deletes if the category belongs to this merchant's store.
-    // Products in this category are kept and unlinked (ON DELETE SET NULL).
+    // 3. Eliminación segura: exige coincidencia de `id` y `store_id` para evitar borrar categorías de otros comerciantes
     const result = await prisma.categories.deleteMany({ where: { id, store_id: store.id } });
     if (result.count === 0) {
       res.status(404).json({ success: false, message: 'Category not found' });
       return;
     }
+
     res.status(200).json({ success: true, message: 'Category deleted successfully' });
   } catch (error) {
     console.error("deleteCategory error:", error);
     res.status(500).json({ success: false, message: 'Failed to delete category' });
   }
-}
+};
