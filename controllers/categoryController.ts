@@ -114,3 +114,31 @@ export const createCategory = async (req: AuthenticatedRequest, res: Response): 
     res.status(500).json({ success: false, message: 'Failed to create category' });
   }
 };
+
+export const deleteCategory = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ success: false, message: 'Invalid category id' });
+      return;
+    }
+
+    const store = await getStore(req.user!.id);
+    if (!store) {
+      res.status(404).json({ success: false, message: 'Store not found' });
+      return;
+    }
+
+    // Only deletes if the category belongs to this merchant's store.
+    // Products in this category are kept and unlinked (ON DELETE SET NULL).
+    const result = await prisma.categories.deleteMany({ where: { id, store_id: store.id } });
+    if (result.count === 0) {
+      res.status(404).json({ success: false, message: 'Category not found' });
+      return;
+    }
+    res.status(200).json({ success: true, message: 'Category deleted successfully' });
+  } catch (error) {
+    console.error("deleteCategory error:", error);
+    res.status(500).json({ success: false, message: 'Failed to delete category' });
+  }
+}
