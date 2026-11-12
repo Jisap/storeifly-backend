@@ -86,37 +86,141 @@ const isHttpsUrl = (value: unknown): value is string => {
   }
 }
 
+/**
+ * Aplica una transformación de IA de Cloudinary a una URL de imagen ya
+ * subida, insertándola en la propia URL (Cloudinary transforma "al vuelo"
+ * al servir la imagen; el original no se modifica).
+ *
+ * Acciones disponibles:
+ *  - `"bg-remove"`: elimina el fondo de la imagen (`e_background_removal`).
+ *  - `"recolor"`: cambia el color de un objeto descrito con texto
+ *    (`e_gen_recolor`). Ejemplo: prompt "sofa" + toColor "blue" → el sofá
+ *    de la imagen se vuelve azul.
+ *
+ * Ejemplo (recolor):
+ *   Entrada: https://res.cloudinary.com/mi-cuenta/image/upload/v123/foto.jpg
+ *   Salida:  https://res.cloudinary.com/mi-cuenta/image/upload/
+ *            e_gen_recolor:prompt_sofa;to-color_blue/f_auto,q_auto/v123/foto.jpg
+ *
+ * IMPORTANTE: esta función NO valida que la URL sea de tu cuenta. Antes de
+ * llamarla, comprueba la URL con `isOwnCloudinaryUrl`.
+ *
+ * @param url     - URL de la imagen en Cloudinary (debe contener "/image/upload/").
+ * @param action  - Transformación a aplicar: "recolor" o "bg-remove".
+ * @param options - Opciones, solo usadas en "recolor":
+ *   - `prompt`:  texto que describe QUÉ objeto recolorear (ej. "sofa").
+ *   - `toColor`: color destino (ej. "blue"). Por defecto "red".
+ *   - `multiple`: si es true, recolorea TODAS las instancias del objeto
+ *                 y no solo la más prominente.
+ * @returns La URL con la transformación insertada.
+ */
 export function applyCloudinaryTransformations(
   url: string,
   action: "recolor" | "bg-remove",
   options: { prompt?: string; toColor?: string; multiple?: boolean } = {},
 ): string {
-  // Only letters, numbers and spaces may reach the URL, so users can't inject extra transformations
+  // SEGURIDAD: estos valores vienen del usuario y acaban dentro de la URL.
+  // Si no se limpian, alguien podría colar "/" , ";" o "," y añadir
+  // transformaciones extra. Por eso solo se permiten letras, números y espacios.
+  // - `.replace(/[^a-zA-Z0-9 ]/g, "")` elimina cualquier otro carácter.
+  //   (Ojo: también elimina tildes y ñ, así que "sofá" pasaría a "sof".)
+  // - `.trim()` quita espacios sobrantes en los extremos.
+  // - `.slice(0, 100)` limita la longitud a 100 caracteres.
   const prompt = (options.prompt || "").replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 100);
+
+  // Igual para el color, pero sin espacios, máximo 20 caracteres.
+  // Si queda vacío (no se envió o todo era inválido), se usa "red" por defecto.
+  // Ojo: un color en hex con "#" (ej. "#ff0000") perdería el "#" → "ff0000".
   const toColor = (options.toColor || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 20) || "red";
 
+  // Se construye el segmento de transformación que irá en la URL.
   const transform = action === "bg-remove"
+    // Quitar fondo + formato y calidad automáticos.
     ? "e_background_removal/f_auto,q_auto"
+    // Recolorear. Sintaxis de Cloudinary:
+    //   e_gen_recolor:prompt_<objeto>;to-color_<color>[;multiple_true]
+    // `encodeURIComponent` convierte los espacios en %20 para que la URL sea válida.
+    // `;multiple_true` solo se añade si options.multiple es true.
     : `e_gen_recolor:prompt_${encodeURIComponent(prompt)};to-color_${toColor}${options.multiple ? ";multiple_true" : ""}/f_auto,q_auto`;
 
+  // Cloudinary lee las transformaciones justo después de "/image/upload/".
+  // Si la URL no contiene ese fragmento, `replace` no hace nada y se
+  // devuelve la URL sin cambios.
   return url.replace("/image/upload/", `/image/upload/${transform}/`);
 }
 
+/**
+ * Sube una imagen (en memoria) a Cloudinary mediante un stream.
+ *
+ * Recibe un `Buffer`, por lo que encaja con archivos recibidos con
+ * multer usando `memoryStorage` (el archivo no se guarda en disco).
+ *
+ * @param fileBuffer - Contenido binario de la imagen.
+ * @param folder     - Carpeta de Cloudinary donde se guardará.
+ *                     Por defecto: 'storeifly'.
+ * @returns Promesa con:
+ *   - `url`: URL HTTPS de la imagen, ya optimizada con f_auto,q_auto.
+ *   - `public_id`: identificador en Cloudinary. Guárdalo: lo necesitarás
+ *     para borrar o referenciar la imagen más adelante.
+ * @throws Rechaza la promesa si Cloudinary devuelve un error o no devuelve resultado.
+ */
 export const uploadToCloudinary = (
   fileBuffer: Buffer,
   folder: string = 'storeifly',
 ): Promise<{ url: string; public_id: string }> => {
+  // `upload_stream` trabaja con callbacks, no con promesas. Se envuelve
+  // en una `Promise` para poder usarlo con async/await.
   return new Promise((resolve, reject) => {
+    // Crea un stream de escritura hacia Cloudinary.
+    // `resource_type: "image"` indica que el archivo es una imagen.
     const uploadStream = cloudinary.uploader.upload_stream(
       { folder, resource_type: "image" },
+      // Callback: se ejecuta cuando termina la subida (con éxito o error).
       (error, result) => {
         if (error || !result) {
+          // Si no hay `error` pero tampoco `result`, se crea un error genérico.
           reject(error || new Error('Failed to upload image'));
         } else {
+          // `secure_url` es la URL https; se le añade f_auto,q_auto.
           resolve({ url: optimizeDeliveryUrl(result.secure_url), public_id: result.public_id });
         }
       }
     );
+    // Escribe el buffer en el stream y lo cierra, lo que dispara la subida.
+    // Debe ir DESPUÉS de crear el stream; sin `.end()` la subida nunca termina.
     uploadStream.end(fileBuffer);
   });
+}
+
+// Upload single image to cloudinary
+export const uploadSingle = async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    const { url, public_id } = await uploadToCloudinary(req.file.buffer, 'storeifly');
+    return res.status(200).json({ success: true, url, public_id });
+  } catch (error) {
+    console.error('Error uploading to Cloudinary:', error);
+    return res.status(500).json({ success: false, message: 'Failed to upload image' });
+  }
+}
+
+// upload multiple images to cloudinary in parallel
+export const uploadMultiple = async (req: Request, res: Response) => {
+  try {
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) {
+      return res.status(400).json({ success: false, message: 'No files uploaded' });
+    }
+
+    const images = await Promise.all(
+      files.map((file) => uploadToCloudinary(file.buffer, 'storeifly'))
+    );
+    return res.status(200).json({ success: true, urls: images.map((i) => i.url), images });
+  } catch (error) {
+    console.error('Error uploading to Cloudinary:', error);
+    return res.status(500).json({ success: false, message: 'Failed to upload images' });
+  }
 }
