@@ -369,3 +369,17 @@ export const aiTransform = async (req: Request, res: Response) => {
     return res.status(500).json({ success: false, message: 'Failed to transform image' });
   }
 }
+
+const ensureCloudinaryUrl = async (url: string, folder = 'storeifly/tryon'): Promise<string> => {
+  if (isOwnCloudinaryUrl(url)) {
+    return url;
+  }
+  const res = await cloudinary.uploader.upload(url, {
+    folder,
+    resource_type: 'image',
+  }).catch((error) => {
+    console.error('Error uploading to Cloudinary:', error);
+    throw new Error('Failed to upload image to Cloudinary');
+  });
+  return res.secure_url;
+}
