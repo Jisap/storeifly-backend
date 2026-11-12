@@ -558,3 +558,53 @@ export const generateOnModelImage = async (params: GenerateOnModelImageParams):
     limits: data?.limits,
   };
 }
+
+// controller endpoint for on-model catalog photography / virtual try-on
+export const aiOnModel = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { productImageUrl, modelImage, customPrompt, preference } = req.body ?? {};
+
+    if (!isHttpsUrl(productImageUrl) || !isHttpsUrl(modelImage)) {
+      return res.status(400).json({ success: false, message: 'Both productImageUrl and modelImage (https URLs) are required' });
+    }
+    if (customPrompt !== undefined && (typeof customPrompt !== "string" || customPrompt.length > 1000)) {
+      return res.status(400).json({ success: false, message: 'customPrompt must be text of 1000 characters or less' });
+    }
+
+    const [modelUrl, productUrl] = await Promise.all([
+      ensureCloudinaryUrl(modelImage, 'storeifly/models'),
+      ensureCloudinaryUrl(productImageUrl, 'storeifly/products'),
+    ]);
+
+    const prompt = customPrompt?.trim()
+      ? customPrompt.includes("[1]") && customPrompt.includes("[2]")
+        ? customPrompt.replace("[1]", productUrl).replace("[2]", modelUrl)
+        : `${customPrompt} ${productUrl} ${modelUrl}`
+      : `A high-quality image of a model wearing the product. Product image: ${productUrl}. Model image: ${modelUrl}.`;
+
+    // Generated on the server so users can't overwrite other assets in your Cloudinary account
+    const targetPublicId = `storeifly/tryon/${req.user!.id}/${Date.now()}`;
+
+    const result = await generateOnModelImage({
+      prompt,
+      modelImage: modelUrl,
+      productImageUrl: productUrl,
+      targetPublicId,
+      preference: typeof preference === "string" ? preference : undefined,
+    });
+
+    return res.status(200).json({
+      success: true,
+      url: result.secureUrl,
+      public_id: result.publicId,
+      model: result.model,
+      prompt,
+      modelUrl,
+      productUrl,
+      limits: result.limits,
+    });
+  } catch (error) {
+    console.error('Error in on-model photography:', error);
+    return res.status(500).json({ success: false, message: 'Failed to process on-model photography' });
+  }
+}
