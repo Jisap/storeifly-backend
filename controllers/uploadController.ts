@@ -192,35 +192,124 @@ export const uploadToCloudinary = (
   });
 }
 
-// Upload single image to cloudinary
+/**
+ * Controlador: sube UNA imagen a Cloudinary.
+ *
+ * Ruta esperada: POST con `multipart/form-data`. El archivo debe llegar
+ * ya procesado por multer (ej. `upload.single('image')`) con
+ * `memoryStorage`, de modo que `req.file.buffer` contenga la imagen.
+ * Sin ese middleware, `req.file` será `undefined`.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, url, public_id }`
+ *  - 400: no se envió ningún archivo.
+ *  - 500: falló la subida a Cloudinary (o error inesperado).
+ *
+ * @param req - Petición de Express; `req.file` lo rellena multer.
+ * @param res - Respuesta de Express.
+ */
 export const uploadSingle = async (req: Request, res: Response) => {
   try {
+    // Si multer no encontró archivo (campo vacío o nombre de campo
+    // incorrecto), se responde con 400 (error del cliente).
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
+    // Sube el buffer a la carpeta 'storeifly'. Devuelve la URL ya
+    // optimizada (f_auto,q_auto) y el public_id de Cloudinary.
     const { url, public_id } = await uploadToCloudinary(req.file.buffer, 'storeifly');
+
+    // Devuelve ambos datos. Guarda `public_id` si más adelante quieres
+    // poder borrar o gestionar la imagen.
     return res.status(200).json({ success: true, url, public_id });
   } catch (error) {
+    // El detalle del error se queda en el log del servidor; al cliente
+    // solo se le envía un mensaje genérico para no exponer información interna.
     console.error('Error uploading to Cloudinary:', error);
     return res.status(500).json({ success: false, message: 'Failed to upload image' });
   }
 }
 
-// upload multiple images to cloudinary in parallel
+/**
+ * Controlador: sube VARIAS imágenes a Cloudinary en paralelo.
+ *
+ * Ruta esperada: POST con `multipart/form-data`, procesado por multer con
+ * `upload.array('images')` o similar y `memoryStorage`. Los archivos
+ * llegan en `req.files` como un array.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, urls: string[], images: { url, public_id }[] }`
+ *         (`urls` es un atajo con solo las URLs; `images` incluye también
+ *         los `public_id`).
+ *  - 400: no se enviaron archivos.
+ *  - 500: falló alguna subida (o error inesperado).
+ *
+ * ATENCIÓN: si UNA sola subida falla, `Promise.all` rechaza todo y se
+ * responde 500, aunque las demás ya se hayan subido. Esas imágenes
+ * quedan en Cloudinary sin que el cliente reciba su `public_id`.
+ *
+ * @param req - Petición de Express; `req.files` lo rellena multer.
+ * @param res - Respuesta de Express.
+ */
 export const uploadMultiple = async (req: Request, res: Response) => {
   try {
+    // `req.files` no está tipado con precisión en Express, por eso se
+    // fuerza (cast) a un array de archivos de multer. Puede ser
+    // `undefined` si multer no encontró ningún archivo.
     const files = req.files as Express.Multer.File[] | undefined;
     if (!files || files.length === 0) {
       return res.status(400).json({ success: false, message: 'No files uploaded' });
     }
 
+    // Lanza todas las subidas a la vez (en paralelo) en lugar de una por
+    // una, lo que es mucho más rápido. `Promise.all` espera a que
+    // terminen todas y devuelve los resultados en el MISMO ORDEN que `files`.
     const images = await Promise.all(
       files.map((file) => uploadToCloudinary(file.buffer, 'storeifly'))
     );
+
+    // `urls` facilita el uso directo en el frontend; `images` conserva
+    // el `public_id` de cada una.
     return res.status(200).json({ success: true, urls: images.map((i) => i.url), images });
   } catch (error) {
     console.error('Error uploading to Cloudinary:', error);
     return res.status(500).json({ success: false, message: 'Failed to upload images' });
+  }
+}
+
+// AI Transformation of images to cloudinary
+export const aiTransform = async (req: Request, res: Response) => {
+  try {
+    const { imageUrl, action, prompt, toColor, multiple } = req.body ?? {};
+    if (!isHttpsUrl(imageUrl)) {
+      return res.status(400).json({ success: false, message: 'A valid https imageUrl is required' });
+    }
+    if (action !== "recolor" && action !== "bg-remove") {
+      return res.status(400).json({ success: false, message: 'action must be "recolor" or "bg-remove"' });
+    }
+    if (action === "recolor" && !prompt) {
+      return res.status(400).json({ success: false, message: 'prompt is required for recolor' });
+    }
+
+    let baseCloudinaryUrl = imageUrl;
+
+    // Ensure Image is hosted on Cloudinary
+    if (!isOwnCloudinaryUrl(imageUrl)) {
+      const uploadResult = await cloudinary.uploader.upload(imageUrl, {
+        folder: 'storeifly/products',
+        resource_type: 'image',
+      });
+      baseCloudinaryUrl = uploadResult.secure_url;
+    }
+
+    const transformedUrl = applyCloudinaryTransformations(baseCloudinaryUrl, action, {
+      prompt, toColor, multiple: Boolean(multiple),
+    });
+
+    return res.status(200).json({ success: true, transformedUrl, originalUrl: baseCloudinaryUrl });
+  } catch (error) {
+    console.error('Error transforming image:', error);
+    return res.status(500).json({ success: false, message: 'Failed to transform image' });
   }
 }
