@@ -370,16 +370,191 @@ export const aiTransform = async (req: Request, res: Response) => {
   }
 }
 
+/**
+ * Garantiza que una imagen esté alojada en TU cuenta de Cloudinary y
+ * devuelve su URL.
+ *
+ * - Si la URL ya es de tu cuenta (`isOwnCloudinaryUrl`), se devuelve tal
+ *   cual, sin subir nada (evita duplicados).
+ * - Si es de otro sitio, le pide a Cloudinary que la descargue y la
+ *   guarde en `folder`, y devuelve la URL de la copia.
+ *
+ * Es la versión reutilizable del bloque "Ensure Image is hosted on
+ * Cloudinary" de `aiTransform`, pensada para funciones que necesitan
+ * trabajar siempre con imágenes alojadas en tu cuenta (aquí, por el
+ * nombre de la carpeta por defecto, el probador virtual / "try-on").
+ *
+ * @param url    - URL de la imagen (se espera https; validar antes con `isHttpsUrl`).
+ * @param folder - Carpeta de Cloudinary para la copia.
+ *                 Por defecto: 'storeifly/tryon'.
+ * @returns La URL https de la imagen en tu cuenta de Cloudinary.
+ * @throws Error('Failed to upload image to Cloudinary') si la subida falla.
+ */
 const ensureCloudinaryUrl = async (url: string, folder = 'storeifly/tryon'): Promise<string> => {
+  // Atajo: si la imagen ya es nuestra no hace falta subirla otra vez.
   if (isOwnCloudinaryUrl(url)) {
     return url;
   }
+
+  // Cloudinary descarga la imagen desde `url` y la guarda en nuestra cuenta.
+  // `.catch()` se encadena directamente a la promesa de `upload` para
+  // interceptar el error en este punto.
   const res = await cloudinary.uploader.upload(url, {
     folder,
     resource_type: 'image',
   }).catch((error) => {
+    // El detalle real (URL inaccesible, formato no válido, credenciales...)
+    // se queda en el log del servidor.
     console.error('Error uploading to Cloudinary:', error);
+    // Se lanza un error genérico: quien llame a la función no recibe
+    // detalles internos de Cloudinary. Al ser `async`, este `throw`
+    // se convierte en un rechazo de la promesa.
     throw new Error('Failed to upload image to Cloudinary');
   });
+
+  // `secure_url` es la URL https de la copia ya alojada en tu cuenta.
   return res.secure_url;
+}
+
+/**
+ * Parámetros de entrada para generar una imagen "on model": una imagen
+ * en la que el producto aparece puesto sobre una modelo (probador virtual).
+ */
+export interface GenerateOnModelImageParams {
+  /** Instrucción de texto que describe la imagen a generar. */
+  prompt: string;
+  /** URL de la imagen del producto (ej. una prenda). */
+  productImageUrl: string;
+  /** URL de la imagen de la modelo sobre la que se coloca el producto. */
+  modelImage: string;
+  /** `public_id` con el que se guardará el resultado en tu Cloudinary. */
+  targetPublicId: string;
+  /** Opcional: preferencia de modelo de IA. Si se omite, Cloudinary decide. */
+  preference?: string;
+}
+
+/**
+ * Resultado de la generación.
+ */
+export interface GenerateOnModelResult {
+  /** URL https de la imagen generada (ya optimizada con f_auto,q_auto). */
+  secureUrl: string;
+  /** `public_id` de la imagen generada en Cloudinary. */
+  publicId: string;
+  /** Opcional: modelo de IA que se usó realmente. */
+  model?: string;
+  /** Opcional: información de límites/cuota devuelta por la API
+   *  (tipado como `any` porque su forma no está definida aquí). */
+  limits?: any;
+}
+
+/**
+ * Genera una imagen del producto puesto sobre una modelo llamando a la
+ * API de generación con IA de Cloudinary (endpoint `image_to_image`).
+ *
+ * Flujo:
+ *  1. Comprueba que las credenciales de Cloudinary están configuradas.
+ *  2. Construye el payload (prompt + imágenes de referencia + destino).
+ *  3. Hace una petición POST autenticada con Basic auth.
+ *  4. Valida la respuesta y extrae la URL de la imagen generada.
+ *  5. Devuelve la URL optimizada, el public_id y metadatos.
+ *
+ * Las URLs de entrada deben ser accesibles por Cloudinary. Conviene
+ * pasarlas antes por `isHttpsUrl` y `ensureCloudinaryUrl`.
+ *
+ * @param params - Ver `GenerateOnModelImageParams`.
+ * @returns Promesa con `GenerateOnModelResult`.
+ * @throws Error si faltan credenciales, si la API responde con error
+ *         (el error incluye `status` y `details`) o si la respuesta no
+ *         contiene ninguna URL de imagen.
+ */
+export const generateOnModelImage = async (params: GenerateOnModelImageParams):
+  Promise<GenerateOnModelResult> => {
+  // Lee la configuración de Cloudinary del servidor. Esta llamada va
+  // directa a la API REST (no usa el SDK), así que necesita las TRES
+  // credenciales: cloud_name, api_key y api_secret.
+  const { cloud_name, api_key, api_secret } = cloudinary.config();
+
+  // Si falta alguna, se corta aquí con un mensaje claro en vez de
+  // fallar más tarde con un error de autenticación poco descriptivo.
+  if (!cloud_name || !api_key || !api_secret) {
+    throw new Error("Cloudinary instance credentials are not configured");
+  }
+
+  // Cuerpo de la petición que se enviará a la API.
+  const payload = {
+    // Texto con las instrucciones de generación.
+    prompt: params.prompt,
+
+    // Imágenes de referencia que la IA usa como base. El ORDEN importa
+    // y debe ser coherente con tu prompt: primero la modelo, después
+    // el producto. `source_type: "url"` indica que se pasan por URL.
+    reference_images: [
+      { source_type: "url", url: params.modelImage },
+      { source_type: "url", url: params.productImageUrl },
+    ],
+
+    // Selección del modelo de IA. `mode: "auto"` deja que Cloudinary
+    // elija. Si se pasó `preference`, se añade con un spread condicional:
+    // `...(cond ? {a} : {})` añade la propiedad solo cuando existe.
+    model: { mode: "auto", ...(params.preference ? { preference: params.preference } : {}) },
+
+    // Dónde guardar el resultado: como un asset gestionado por
+    // Cloudinary bajo el `public_id` indicado.
+    target: { target_type: "managed_asset", public_id: params.targetPublicId },
+  };
+
+  // Petición a la API de generación. El cloud_name va en la propia ruta.
+  // Se usa `fetch` nativo (disponible en Node 18+).
+  const response = await fetch(`https://api.cloudinary.com/v2/generate/${cloud_name}/image_to_image`, {
+    method: "POST",
+    headers: {
+      // Basic auth: "api_key:api_secret" codificado en base64.
+      // Estas credenciales nunca deben enviarse al cliente ni escribirse en logs.
+      Authorization: `Basic ${Buffer.from(`${api_key}:${api_secret}`).toString("base64")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  // Lee el cuerpo como JSON. Si la respuesta no es JSON válido (ej. una
+  // página de error HTML), `.catch` devuelve `null` en vez de lanzar,
+  // y el control de errores de abajo lo gestiona.
+  const data: any = await response.json().catch(() => null);
+
+  // Error si el HTTP no es 2xx o si no hubo cuerpo interpretable.
+  if (!response.ok || !data) {
+    // Mensaje: el de la API si existe; si no, uno genérico con el código HTTP.
+    const err: any = new Error(data?.error?.message || data?.message || `Cloudinary API error (${response.status})`);
+    // Se adjuntan `status` y `details` al error para que quien lo capture
+    // (ej. un controlador) pueda responder con el código adecuado
+    // (400, 401, 429...) y registrar los detalles.
+    err.status = response.status;
+    err.details = data?.error;
+    throw err;
+  }
+
+  // La API puede devolver los assets en rutas distintas según la versión
+  // o el tipo de respuesta, por eso se prueban dos ubicaciones con `?.`
+  // (optional chaining), que evita errores si algún nivel no existe.
+  const asset = data?.data?.assets?.[0] || data?.data?.result?.assets?.[0];
+
+  // Se busca la URL de la imagen en varios sitios posibles, por orden de
+  // preferencia: asset.storage.secure_url → asset.secure_url → raíz.
+  const rawUrl = asset?.storage?.secure_url || asset?.secure_url || data?.secure_url;
+
+  // Si la API respondió bien pero sin URL, se trata como error.
+  if (!rawUrl) throw new Error("No image URL returned from Cloudinary generation");
+
+  return {
+    // URL con `f_auto,q_auto` añadido (formato y calidad automáticos).
+    secureUrl: optimizeDeliveryUrl(rawUrl),
+    // Se prefiere el public_id que devuelve la API; si no viene, se usa
+    // el que se pidió en `targetPublicId`.
+    publicId: asset?.storage?.public_id || params.targetPublicId,
+    // Modelo de IA usado realmente (si la API lo informa).
+    model: asset?.model,
+    // Datos de cuota/límites (si la API los informa).
+    limits: data?.limits,
+  };
 }
