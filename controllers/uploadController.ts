@@ -559,40 +559,101 @@ export const generateOnModelImage = async (params: GenerateOnModelImageParams):
   };
 }
 
-// controller endpoint for on-model catalog photography / virtual try-on
+/**
+ * Controlador: genera una imagen "on model" (fotografía de catálogo /
+ * probador virtual) con IA a partir de la imagen de un producto y la de
+ * una modelo.
+ *
+ * Requiere usuario autenticado (`AuthenticatedRequest`): el middleware de
+ * auth debe haber rellenado `req.user` antes de llegar aquí.
+ *
+ * Ruta esperada: POST con body JSON (necesita `express.json()`):
+ *   {
+ *     "productImageUrl": "https://...",  // obligatorio, https
+ *     "modelImage":      "https://...",  // obligatorio, https
+ *     "customPrompt":    "texto",        // opcional, máx. 1000 caracteres
+ *     "preference":      "..."           // opcional, preferencia de modelo de IA
+ *   }
+ *
+ * Flujo:
+ *  1. Valida los datos de entrada.
+ *  2. Se asegura de que ambas imágenes estén en tu Cloudinary
+ *     (`ensureCloudinaryUrl`), subiendo una copia si hace falta.
+ *  3. Construye el prompt que se enviará a la IA.
+ *  4. Genera un `public_id` de destino controlado por el servidor.
+ *  5. Llama a `generateOnModelImage` y devuelve el resultado.
+ *
+ * Respuestas:
+ *  - 200: `{ success, url, public_id, model, prompt, modelUrl, productUrl, limits }`
+ *  - 400: datos de entrada inválidos.
+ *  - 500: cualquier error inesperado (subida, API de IA, etc.).
+ *
+ * @param req - Petición autenticada de Express con el body descrito arriba.
+ * @param res - Respuesta de Express.
+ */
 export const aiOnModel = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    // `req.body ?? {}` evita un error si el body llega `undefined`
+    // (por ejemplo, si falta el middleware `express.json()`).
     const { productImageUrl, modelImage, customPrompt, preference } = req.body ?? {};
 
+    // VALIDACIÓN 1: ambas imágenes deben ser strings con URL https.
+    // Gracias al type guard, TypeScript sabe que ambas son `string`
+    // a partir de aquí.
     if (!isHttpsUrl(productImageUrl) || !isHttpsUrl(modelImage)) {
       return res.status(400).json({ success: false, message: 'Both productImageUrl and modelImage (https URLs) are required' });
     }
+
+    // VALIDACIÓN 2: `customPrompt` es opcional, pero si viene debe ser
+    // un string de como máximo 1000 caracteres (limita abusos y coste).
     if (customPrompt !== undefined && (typeof customPrompt !== "string" || customPrompt.length > 1000)) {
       return res.status(400).json({ success: false, message: 'customPrompt must be text of 1000 characters or less' });
     }
 
+    // Garantiza que las dos imágenes estén alojadas en TU Cloudinary.
+    // Se procesan en paralelo (`Promise.all`) y el resultado llega en el
+    // mismo orden: [modelo, producto]. Cada una va a su propia carpeta.
+    // Si alguna subida falla, `ensureCloudinaryUrl` lanza un error y se
+    // salta al `catch` (responde 500).
     const [modelUrl, productUrl] = await Promise.all([
       ensureCloudinaryUrl(modelImage, 'storeifly/models'),
       ensureCloudinaryUrl(productImageUrl, 'storeifly/products'),
     ]);
 
+    // CONSTRUCCIÓN DEL PROMPT. Hay tres casos:
+    //  1. `customPrompt` con marcadores "[1]" y "[2]": se sustituyen por
+    //     las URLs. [1] → producto, [2] → modelo.
+    //     Ej.: "Pon la prenda [1] sobre la modelo [2]"
+    //     (`replace` con string solo cambia la PRIMERA aparición de cada marcador).
+    //  2. `customPrompt` sin marcadores: se le añaden las URLs al final
+    //     (producto primero, modelo después).
+    //  3. Sin `customPrompt` (o solo espacios): se usa un prompt por defecto.
     const prompt = customPrompt?.trim()
       ? customPrompt.includes("[1]") && customPrompt.includes("[2]")
         ? customPrompt.replace("[1]", productUrl).replace("[2]", modelUrl)
         : `${customPrompt} ${productUrl} ${modelUrl}`
       : `A high-quality image of a model wearing the product. Product image: ${productUrl}. Model image: ${modelUrl}.`;
 
-    // Generated on the server so users can't overwrite other assets in your Cloudinary account
+    // SEGURIDAD: el `public_id` de destino lo genera el servidor, nunca
+    // el cliente, para que nadie pueda sobrescribir assets ajenos de tu
+    // cuenta. Formato: storeifly/tryon/<id de usuario>/<timestamp en ms>.
+    // `req.user!` (el "!" afirma que no es undefined) es seguro SOLO si
+    // la ruta está protegida por el middleware de autenticación.
     const targetPublicId = `storeifly/tryon/${req.user!.id}/${Date.now()}`;
 
+    // Llama a la API de IA de Cloudinary (ver `generateOnModelImage`).
     const result = await generateOnModelImage({
       prompt,
       modelImage: modelUrl,
       productImageUrl: productUrl,
       targetPublicId,
+      // Solo se pasa `preference` si es un string; cualquier otro tipo se ignora.
       preference: typeof preference === "string" ? preference : undefined,
     });
 
+    // Se devuelve la imagen generada y también los datos intermedios
+    // (prompt final y URLs en tu Cloudinary), útiles para mostrarlos,
+    // depurar o regenerar con el mismo prompt.
     return res.status(200).json({
       success: true,
       url: result.secureUrl,
@@ -604,6 +665,8 @@ export const aiOnModel = async (req: AuthenticatedRequest, res: Response) => {
       limits: result.limits,
     });
   } catch (error) {
+    // El detalle queda en el log del servidor; el cliente solo recibe
+    // un mensaje genérico.
     console.error('Error in on-model photography:', error);
     return res.status(500).json({ success: false, message: 'Failed to process on-model photography' });
   }
