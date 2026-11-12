@@ -278,37 +278,93 @@ export const uploadMultiple = async (req: Request, res: Response) => {
   }
 }
 
-// AI Transformation of images to cloudinary
+/**
+ * Controlador: aplica una transformación de IA de Cloudinary a una imagen
+ * y devuelve la URL resultante.
+ *
+ * Ruta esperada: POST con body JSON (necesita `express.json()`):
+ *   {
+ *     "imageUrl": "https://...",        // obligatorio, debe ser https
+ *     "action":   "recolor" | "bg-remove", // obligatorio
+ *     "prompt":   "sofa",               // obligatorio solo en "recolor"
+ *     "toColor":  "blue",               // opcional (por defecto "red")
+ *     "multiple": true                  // opcional
+ *   }
+ *
+ * Flujo:
+ *  1. Valida los datos de entrada.
+ *  2. Si la imagen NO está en tu Cloudinary, la copia allí primero
+ *     (las transformaciones de IA solo funcionan con imágenes alojadas
+ *     en Cloudinary).
+ *  3. Construye la URL transformada con `applyCloudinaryTransformations`.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, transformedUrl, originalUrl }`
+ *         (`originalUrl` es la URL base en Cloudinary, sin transformar).
+ *  - 400: datos de entrada inválidos.
+ *  - 500: error inesperado (p. ej. falló la copia a Cloudinary).
+ *
+ * NOTA: Cloudinary no transforma la imagen cuando se llama a este
+ * controlador, sino la primera vez que alguien abre `transformedUrl`.
+ *
+ * @param req - Petición de Express con el body descrito arriba.
+ * @param res - Respuesta de Express.
+ */
 export const aiTransform = async (req: Request, res: Response) => {
   try {
+    // `req.body ?? {}` evita un error si el body llega `undefined`
+    // (por ejemplo, si falta el middleware `express.json()`).
     const { imageUrl, action, prompt, toColor, multiple } = req.body ?? {};
+
+    // VALIDACIÓN 1: imageUrl debe ser un string con una URL https.
+    // Gracias al type guard, a partir de aquí TypeScript sabe que
+    // `imageUrl` es `string`.
     if (!isHttpsUrl(imageUrl)) {
       return res.status(400).json({ success: false, message: 'A valid https imageUrl is required' });
     }
+
+    // VALIDACIÓN 2: solo se aceptan las dos acciones soportadas.
+    // También estrecha el tipo de `action` a "recolor" | "bg-remove".
     if (action !== "recolor" && action !== "bg-remove") {
       return res.status(400).json({ success: false, message: 'action must be "recolor" or "bg-remove"' });
     }
+
+    // VALIDACIÓN 3: para recolorear hace falta saber QUÉ objeto
+    // recolorear, así que el prompt es obligatorio.
     if (action === "recolor" && !prompt) {
       return res.status(400).json({ success: false, message: 'prompt is required for recolor' });
     }
 
+    // URL de la imagen ya alojada en Cloudinary. Empieza siendo la
+    // que envió el cliente y se sustituye si hay que copiarla.
     let baseCloudinaryUrl = imageUrl;
 
-    // Ensure Image is hosted on Cloudinary
+    // Las transformaciones de IA requieren que la imagen esté en
+    // Cloudinary. Si la URL es de otro sitio (otro dominio u otra
+    // cuenta de Cloudinary), se le pide a Cloudinary que la descargue
+    // y la guarde en la carpeta 'storeifly/products'.
     if (!isOwnCloudinaryUrl(imageUrl)) {
       const uploadResult = await cloudinary.uploader.upload(imageUrl, {
         folder: 'storeifly/products',
         resource_type: 'image',
       });
+      // A partir de ahora se trabaja con la copia en nuestra cuenta.
       baseCloudinaryUrl = uploadResult.secure_url;
     }
 
+    // Inserta la transformación en la URL. `applyCloudinaryTransformations`
+    // sanea `prompt` y `toColor` internamente.
+    // `Boolean(multiple)` convierte cualquier valor recibido a true/false.
     const transformedUrl = applyCloudinaryTransformations(baseCloudinaryUrl, action, {
       prompt, toColor, multiple: Boolean(multiple),
     });
 
+    // Se devuelven ambas URLs para que el frontend pueda mostrar
+    // el "antes y después" o guardar la que prefiera.
     return res.status(200).json({ success: true, transformedUrl, originalUrl: baseCloudinaryUrl });
   } catch (error) {
+    // El detalle queda en el log del servidor; el cliente solo recibe
+    // un mensaje genérico.
     console.error('Error transforming image:', error);
     return res.status(500).json({ success: false, message: 'Failed to transform image' });
   }
