@@ -423,3 +423,30 @@ export const getMyStore = async (req: AuthenticatedRequest, res: Response): Prom
     res.status(500).json({ success: false, message: "Failed to get store" });
   }
 };
+
+// Update merchant's store settings (slug and status can't be changed here)
+export const updateMyStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    const parsed = parseStoreInput(req.body, true);
+    if ("error" in parsed) {
+      res.status(400).json({ success: false, message: parsed.error });
+      return;
+    }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ success: false, message: "No valid fields to update" });
+      return;
+    }
+
+    const updated = await prisma.stores.update({ where: { id: store.id }, data: parsed.data });
+    res.status(200).json({ success: true, message: "Store updated successfully", store: updated });
+  } catch (error) {
+    console.error("updateMyStore error:", error);
+    res.status(500).json({ success: false, message: "Failed to update store" });
+  }
+};
