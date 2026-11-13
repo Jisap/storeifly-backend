@@ -1,7 +1,7 @@
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
-import { updateNeonUserRole, findNeonUserByIds, findNeonMerchants } from "../services/neonUser.js";
+import { updateNeonUserRole } from "../services/neonUser.js";
 
 /**
  * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,
@@ -194,43 +194,91 @@ const parseStoreInput = (body: any, partial: boolean): { data: Record<string, an
   return { data };
 }
 
-// Prisma error code for a unique constraint (e.g. slug already used)
+/**
+ * Comprueba si un error de Prisma corresponde a una violación de
+ * restricción UNIQUE (código "P2002"), por ejemplo un `slug` ya usado.
+ *
+ * Se usa en los `catch` para responder 409 (conflicto) en lugar de 500.
+ *
+ * @param error - Error capturado (tipado `any` porque en un `catch` es `unknown`).
+ * @returns `true` si es un error P2002.
+ */
 const isUniqueError = (error: any) => error?.code === "P2002";
 
-
-// Create a new store. Any logged-in user (except platform admins) can create one,
-// and becomes a merchant when they do.
+/**
+ * Controlador: crea la tienda del usuario autenticado.
+ *
+ * Reglas de negocio:
+ *  - Cualquier usuario autenticado puede crear una tienda, EXCEPTO los
+ *    administradores de la plataforma (role "admin").
+ *  - Cada usuario puede tener UNA sola tienda.
+ *  - Al crearla, el usuario pasa a tener el rol "merchant".
+ *
+ * Ruta esperada: POST con body JSON. Campos: los de `parseStoreInput`
+ * (`name` obligatorio) y, opcionalmente, `slug` (la parte de la URL de la
+ * tienda; si no se envía, se genera a partir del nombre).
+ *
+ * Flujo:
+ *  1. Comprueba que el usuario no es admin.
+ *  2. Comprueba que aún no tiene tienda.
+ *  3. Valida y limpia el body (`parseStoreInput(body, false)`).
+ *  4. Genera el slug y verifica que no esté vacío ni ocupado.
+ *  5. Crea la tienda en la BD.
+ *  6. Actualiza el rol del usuario a "merchant".
+ *
+ * Respuestas:
+ *  - 201: `{ success, message, store }`
+ *  - 400: ya tiene tienda, datos inválidos o slug vacío.
+ *  - 403: el usuario es admin de plataforma.
+ *  - 409: el slug ya está en uso.
+ *  - 500: error inesperado.
+ *
+ * Nota: a diferencia de los controladores de Cloudinary, este NO devuelve
+ * `return res...`; responde con `res...` + `return;` y declara
+ * `Promise<void>`. Es equivalente, solo cambia el estilo.
+ */
 export const createStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id del usuario autenticado. `!` asume que `req.user` existe
+    // (la ruta debe estar protegida por el middleware de auth).
     const merchantId = req.user!.id;
 
-    // Platform Admin account cannot create a store or become a merchant
+    // Los admins de plataforma no pueden tener tienda.
     if (req.user!.role === "admin") {
       res.status(403).json({ success: false, message: "Platform admin accounts cannot create a store" });
       return;
     }
 
-    // Check if merchant already has a store
+    // Limita a una tienda por usuario. Solo se selecciona `id` porque
+    // únicamente interesa saber si existe.
     const existingStore = await prisma.stores.findFirst({ where: { merchant_id: merchantId }, select: { id: true } });
     if (existingStore) {
       res.status(400).json({ success: false, message: "You already have a store" });
       return;
     }
 
+    // Valida el body (modo creación: `name` obligatorio).
+    // `"error" in parsed` distingue las dos formas del union type
+    // y estrecha el tipo: después del `if`, `parsed.data` es válido.
     const parsed = parseStoreInput(req.body, false);
     if ("error" in parsed) {
       res.status(400).json({ success: false, message: parsed.error });
       return;
     }
 
+    // Origen del slug: el `slug` enviado por el cliente si es un string
+    // no vacío; si no, el nombre de la tienda.
     const slugSource = typeof req.body?.slug === "string" && req.body.slug.trim() ? req.body.slug : parsed.data.name;
+    // Se normaliza con `generateSlug` (también al slug enviado por el cliente).
     const finalSlug = generateSlug(slugSource);
+    // Si tras limpiar no queda nada (ej. "!!!"), no es utilizable.
     if (!finalSlug) {
       res.status(400).json({ success: false, message: "Store name or slug must contain letters or numbers" });
       return;
     }
 
-    // Check if slug is already taken
+    // Comprobación previa de unicidad para dar un 409 claro.
+    // No es 100 % fiable (ver notas), por eso el `catch` también gestiona P2002.
     const slugCheck = await prisma.stores.findUnique({ where: { slug: finalSlug }, select: { id: true } });
     if (slugCheck) {
       res.status(409).json({ success: false, message: "That store URL is already taken" });
@@ -239,24 +287,32 @@ export const createStore = async (req: AuthenticatedRequest, res: Response): Pro
 
     const newStore = await prisma.stores.create({
       data: {
+        // Moneda por defecto; `...parsed.data` va DESPUÉS y la
+        // sobrescribe si el cliente envió `currency`.
         currency: "GHS",
         ...parsed.data,
         name: parsed.data.name,
+        // Estos campos van al final a propósito: los controla el
+        // servidor y no pueden ser sobrescritos por el cliente.
         merchant_id: merchantId,
         slug: finalSlug,
-        status: "active", // merchants can't choose their own status
+        status: "active", // el comerciante no elige su propio estado
       },
     });
 
-    // Update user role to merchant (never downgrades an admin)
+    // Convierte al usuario en comerciante (según el comentario original,
+    // nunca rebaja a un admin).
     await updateNeonUserRole(merchantId, "merchant");
 
     res.status(201).json({ success: true, message: "Store created successfully", store: newStore });
   } catch (error) {
+    // Condición de carrera: dos peticiones con el mismo slug pasan la
+    // comprobación previa a la vez; la BD rechaza la segunda con P2002.
     if (isUniqueError(error)) {
       res.status(409).json({ success: false, message: "That store URL is already taken" });
       return;
     }
+    // Cualquier otro error: detalle en el log, mensaje genérico al cliente.
     console.error("createStore error:", error);
     res.status(500).json({ success: false, message: "Failed to create store" });
   }
