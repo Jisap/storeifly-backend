@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
+import { updateNeonUserRole, findNeonUserByIds, findNeonMerchants } from "../services/neonUser.js";
 
 /**
  * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,
@@ -192,3 +193,71 @@ const parseStoreInput = (body: any, partial: boolean): { data: Record<string, an
   // Todo correcto: se devuelven los datos validados.
   return { data };
 }
+
+// Prisma error code for a unique constraint (e.g. slug already used)
+const isUniqueError = (error: any) => error?.code === "P2002";
+
+
+// Create a new store. Any logged-in user (except platform admins) can create one,
+// and becomes a merchant when they do.
+export const createStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const merchantId = req.user!.id;
+
+    // Platform Admin account cannot create a store or become a merchant
+    if (req.user!.role === "admin") {
+      res.status(403).json({ success: false, message: "Platform admin accounts cannot create a store" });
+      return;
+    }
+
+    // Check if merchant already has a store
+    const existingStore = await prisma.stores.findFirst({ where: { merchant_id: merchantId }, select: { id: true } });
+    if (existingStore) {
+      res.status(400).json({ success: false, message: "You already have a store" });
+      return;
+    }
+
+    const parsed = parseStoreInput(req.body, false);
+    if ("error" in parsed) {
+      res.status(400).json({ success: false, message: parsed.error });
+      return;
+    }
+
+    const slugSource = typeof req.body?.slug === "string" && req.body.slug.trim() ? req.body.slug : parsed.data.name;
+    const finalSlug = generateSlug(slugSource);
+    if (!finalSlug) {
+      res.status(400).json({ success: false, message: "Store name or slug must contain letters or numbers" });
+      return;
+    }
+
+    // Check if slug is already taken
+    const slugCheck = await prisma.stores.findUnique({ where: { slug: finalSlug }, select: { id: true } });
+    if (slugCheck) {
+      res.status(409).json({ success: false, message: "That store URL is already taken" });
+      return;
+    }
+
+    const newStore = await prisma.stores.create({
+      data: {
+        currency: "GHS",
+        ...parsed.data,
+        name: parsed.data.name,
+        merchant_id: merchantId,
+        slug: finalSlug,
+        status: "active", // merchants can't choose their own status
+      },
+    });
+
+    // Update user role to merchant (never downgrades an admin)
+    await updateNeonUserRole(merchantId, "merchant");
+
+    res.status(201).json({ success: true, message: "Store created successfully", store: newStore });
+  } catch (error) {
+    if (isUniqueError(error)) {
+      res.status(409).json({ success: false, message: "That store URL is already taken" });
+      return;
+    }
+    console.error("createStore error:", error);
+    res.status(500).json({ success: false, message: "Failed to create store" });
+  }
+};
