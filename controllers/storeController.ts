@@ -317,3 +317,24 @@ export const createStore = async (req: AuthenticatedRequest, res: Response): Pro
     res.status(500).json({ success: false, message: "Failed to create store" });
   }
 };
+
+// Onboard or elevate a user to the merchant role (without creating a store yet)
+export const onboardMerchant = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+
+    // Platform Admin accounts cannot become merchants
+    if (req.user!.role === "admin") {
+      res.status(403).json({ success: false, message: "Platform admin accounts cannot become merchants" });
+      return;
+    }
+
+    await updateNeonUserRole(userId, "merchant");
+    const store = await prisma.stores.findFirst({ where: { merchant_id: userId } });
+
+    res.status(200).json({ success: true, role: "merchant", store: store ?? null });
+  } catch (error) {
+    console.error("onboardMerchant error:", error);
+    res.status(500).json({ success: false, message: "Failed to onboard merchant" });
+  }
+};
