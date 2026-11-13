@@ -379,3 +379,47 @@ export const onboardMerchant = async (req: AuthenticatedRequest, res: Response):
     res.status(500).json({ success: false, message: "Failed to onboard merchant" });
   }
 };
+
+/**
+ * Controlador: devuelve la tienda del usuario autenticado.
+ *
+ * Es la operación de lectura "mi tienda": el comerciante no pasa ningún id,
+ * la tienda se localiza a partir de su propio `req.user.id`. Así nadie puede
+ * consultar la tienda privada de otro usuario cambiando un parámetro.
+ *
+ * Ruta esperada: GET sin body ni parámetros. Requiere autenticación.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, store }`
+ *  - 404: el usuario todavía no ha creado su tienda.
+ *  - 500: error inesperado (BD, etc.).
+ *
+ * Diferencia con `onboardMerchant`: aquí "no tener tienda" es un 404, mientras
+ * que `onboardMerchant` responde 200 con `store: null`. El frontend debe
+ * tratar ese 404 como "mostrar el formulario de creación", no como un fallo.
+ *
+ * @param req - Petición autenticada de Express (`req.user` lo rellena el middleware de auth).
+ * @param res - Respuesta de Express.
+ */
+export const getMyStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    // Busca la tienda cuyo `merchant_id` coincide con el usuario autenticado.
+    // `!` asume que `req.user` existe (la ruta debe estar protegida por el
+    // middleware de auth). Devuelve `null` si no hay ninguna.
+    const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id } });
+
+    // Sin tienda: 404 con un mensaje que el frontend puede usar para
+    // redirigir al usuario al flujo de creación.
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    // Se devuelve el registro completo de la tienda.
+    res.status(200).json({ success: true, store });
+  } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
+    console.error("getMyStore error:", error);
+    res.status(500).json({ success: false, message: "Failed to get store" });
+  }
+};
