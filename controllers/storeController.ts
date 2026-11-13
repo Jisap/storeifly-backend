@@ -424,28 +424,70 @@ export const getMyStore = async (req: AuthenticatedRequest, res: Response): Prom
   }
 };
 
-// Update merchant's store settings (slug and status can't be changed here)
+/**
+ * Controlador: actualiza los ajustes de la tienda del usuario autenticado.
+ *
+ * Igual que `getMyStore`, la tienda se localiza a partir de `req.user.id`, no
+ * de un id enviado por el cliente. Así un comerciante solo puede modificar
+ * SU tienda.
+ *
+ * Es una actualización parcial: solo se modifican los campos que vengan en
+ * el body. Los campos admitidos son los de `parseStoreInput` (name,
+ * description, address, logo_url, banner_url, currency, shipping_fee,
+ * free_shipping_threshold, payment_methods, hero_style, accent_color).
+ *
+ * NO se pueden cambiar aquí:
+ *  - `slug`: la URL pública de la tienda queda fija tras crearla.
+ *  - `status`: lo gestiona la plataforma (ver VALID_STATUSES).
+ *  Ambos se ignoran en silencio, porque `parseStoreInput` solo copia los
+ *  campos de su lista blanca.
+ *
+ * Ruta esperada: PUT/PATCH con body JSON. Requiere autenticación.
+ *
+ * Respuestas:
+ *  - 200: `{ success, message, store }` con la tienda ya actualizada.
+ *  - 400: algún campo inválido, o no hay ningún campo válido que actualizar.
+ *  - 404: el usuario todavía no tiene tienda.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express con el body descrito arriba.
+ * @param res - Respuesta de Express.
+ */
 export const updateMyStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Localiza la tienda del usuario. Solo se selecciona `id`, que es lo
+    // único necesario para el `update` posterior. `!` asume que `req.user`
+    // existe (la ruta debe estar protegida por el middleware de auth).
     const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
     if (!store) {
       res.status(404).json({ success: false, message: "You have not created a store yet" });
       return;
     }
 
+    // Valida el body en modo parcial (`true`): todos los campos son
+    // opcionales y solo se validan los que se hayan enviado.
+    // `"error" in parsed` distingue las dos formas del union type.
     const parsed = parseStoreInput(req.body, true);
     if ("error" in parsed) {
       res.status(400).json({ success: false, message: parsed.error });
       return;
     }
+
+    // Si el body no traía ningún campo reconocido (vacío, o solo con
+    // campos ignorados como `slug` o `status`), no hay nada que hacer.
+    // Se responde 400 en vez de ejecutar un `update` vacío.
     if (Object.keys(parsed.data).length === 0) {
       res.status(400).json({ success: false, message: "No valid fields to update" });
       return;
     }
 
+    // Actualiza usando el `id` de la tienda ya verificada como del usuario
+    // (no uno del cliente). `parsed.data` contiene solo campos validados.
+    // Prisma devuelve el registro completo ya actualizado.
     const updated = await prisma.stores.update({ where: { id: store.id }, data: parsed.data });
     res.status(200).json({ success: true, message: "Store updated successfully", store: updated });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("updateMyStore error:", error);
     res.status(500).json({ success: false, message: "Failed to update store" });
   }
