@@ -318,22 +318,63 @@ export const createStore = async (req: AuthenticatedRequest, res: Response): Pro
   }
 };
 
-// Onboard or elevate a user to the merchant role (without creating a store yet)
+/**
+ * Controlador: convierte al usuario autenticado en comerciante ("merchant")
+ * SIN crearle todavía una tienda.
+ *
+ * Sirve como paso previo del onboarding: el usuario obtiene el rol y,
+ * después, puede crear su tienda con `createStore`. También es útil para
+ * que el frontend sepa en qué punto está el usuario: si la respuesta trae
+ * `store: null`, aún le falta crearla.
+ *
+ * Es idempotente: llamarlo varias veces da el mismo resultado (si ya es
+ * merchant, `updateNeonUserRole` no modifica nada y simplemente se
+ * devuelve su tienda).
+ *
+ * Ruta esperada: POST sin body. Requiere autenticación.
+ *
+ * Flujo:
+ *  1. Rechaza a los administradores de plataforma.
+ *  2. Asigna el rol "merchant" (si procede).
+ *  3. Busca la tienda del usuario, si ya tiene una.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, role: "merchant", store }` (`store` es `null`
+ *         si todavía no tiene tienda).
+ *  - 403: el usuario es admin de plataforma.
+ *  - 500: error inesperado (BD, fallo al actualizar el rol...).
+ *
+ * @param req - Petición autenticada de Express (`req.user` lo rellena el middleware de auth).
+ * @param res - Respuesta de Express.
+ */
 export const onboardMerchant = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id del usuario autenticado. `!` asume que `req.user` existe
+    // (la ruta debe estar protegida por el middleware de auth).
     const userId = req.user!.id;
 
-    // Platform Admin accounts cannot become merchants
+    // Los admins de plataforma no pueden ser comerciantes. Se comprueba
+    // aquí además de en el SQL de `updateNeonUserRole` para devolver un
+    // 403 claro en vez de fallar o ignorar la petición en silencio.
     if (req.user!.role === "admin") {
       res.status(403).json({ success: false, message: "Platform admin accounts cannot become merchants" });
       return;
     }
 
+    // Asigna el rol "merchant". Si el usuario ya lo es, la consulta no
+    // actualiza ninguna fila y no se lanza error.
     await updateNeonUserRole(userId, "merchant");
+
+    // Busca la tienda del usuario (puede no existir). Aquí se devuelve el
+    // registro completo, no solo el `id` como en `createStore`.
     const store = await prisma.stores.findFirst({ where: { merchant_id: userId } });
 
+    // `role` se devuelve fijo como "merchant". `store ?? null` convierte
+    // `undefined` en `null`, para que el JSON siempre incluya la clave
+    // `store` (JSON.stringify omitiría una clave con valor `undefined`).
     res.status(200).json({ success: true, role: "merchant", store: store ?? null });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("onboardMerchant error:", error);
     res.status(500).json({ success: false, message: "Failed to onboard merchant" });
   }
