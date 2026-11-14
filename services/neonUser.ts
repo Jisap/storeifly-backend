@@ -100,3 +100,21 @@ export const updateNeonUserRole = async (userId: string, role: string): Promise<
     throw new Error("Failed to update Neon user role: " + (error as Error).message);
   }
 };
+
+// Looks up many Neon Auth users at once. Returns { [id]: user }.
+// Database errors are thrown so callers can return a 500.
+export const findNeonUserByIds = async (ids: string[]): Promise<Record<string, NeonUserRecord>> => {
+  const uniqueIds = Array.from(new Set((ids ?? []).filter(Boolean)));
+  if (uniqueIds.length === 0) return {};
+
+  const rows = await prisma.$queryRaw<NeonUserRecord[]>`
+        SELECT id, name, email, role, "createdAt", "updatedAt", banned, "banExpires"
+        FROM neon_auth."user"
+        WHERE id = ANY(${uniqueIds}::uuid[])`;
+
+  const map: Record<string, NeonUserRecord> = {};
+  for (const row of rows) {
+    map[row.id] = row;
+  }
+  return map;
+}

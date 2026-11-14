@@ -1,7 +1,7 @@
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
-import { updateNeonUserRole } from "../services/neonUser.js";
+import { updateNeonUserRole, findNeonUserByIds } from "../services/neonUser.js";
 
 /**
  * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,
@@ -493,25 +493,62 @@ export const updateMyStore = async (req: AuthenticatedRequest, res: Response): P
   }
 };
 
-// Platform Admin: get all stores with stats
+/**
+ * Controlador (solo administradores de plataforma): lista TODAS las tiendas
+ * con sus estadísticas básicas y los datos del comerciante propietario.
+ *
+ * Para cada tienda devuelve todos sus campos, más:
+ *  - `_count`: número de productos, pedidos y categorías.
+ *  - `merchant`: `{ id, name, email }` del dueño, o `null` si no se encontró.
+ *
+ * IMPORTANTE: este controlador NO comprueba por sí mismo que el usuario sea
+ * admin. Esa restricción debe aplicarla un middleware en la ruta (por
+ * ejemplo, `requireAdmin`). Sin él, cualquier usuario autenticado vería los
+ * datos de todas las tiendas y los emails de sus comerciantes.
+ *
+ * Ruta esperada: GET sin body ni parámetros.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, stores: [...] }`
+ *  - 500: error inesperado (BD, fallo al consultar Neon Auth...).
+ *
+ * @param _req - Petición (el guion bajo indica que no se usa en la función).
+ * @param res  - Respuesta de Express.
+ */
 export const getAllStores = async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Obtiene todas las tiendas, de la más reciente a la más antigua.
+    // `include._count` hace que Prisma calcule el número de registros
+    // relacionados (productos, pedidos, categorías) sin cargarlos
+    // enteros; llegan en `store._count.products`, etc.
     const stores = await prisma.stores.findMany({
       orderBy: { created_at: "desc" },
       include: { _count: { select: { products: true, orders: true, categories: true } } },
     });
 
-    // Merchants live in Neon Auth, not in Prisma, so look them up separately
+    // Los comerciantes no están en las tablas de Prisma sino en Neon Auth,
+    // así que no se pueden traer con `include`. Se consultan aparte, en UNA
+    // sola llamada con todos los ids (evita el problema de "N+1 consultas").
+    // `.filter((id): id is string => !!id)` descarta los `merchant_id`
+    // nulos/vacíos, y el type guard hace que TypeScript sepa que el
+    // resultado es `string[]`.
     const users = await findNeonUserByIds(stores.map((s) => s.merchant_id).filter((id): id is string => !!id));
 
     res.status(200).json({
       success: true,
+      // Une cada tienda con los datos de su comerciante.
       stores: stores.map((s) => {
+        // `users` funciona como diccionario indexado por id de usuario.
+        // Si la tienda no tiene `merchant_id`, no se busca nada.
         const m = s.merchant_id ? users[s.merchant_id] : undefined;
+        // Se devuelve la tienda completa + solo los campos públicos del
+        // comerciante (id, nombre, email), nunca el objeto de usuario entero.
+        // Si no se encuentra (usuario borrado, etc.), `merchant: null`.
         return { ...s, merchant: m ? { id: m.id, name: m.name, email: m.email } : null };
       }),
     });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getAllStores error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch stores" });
   }
