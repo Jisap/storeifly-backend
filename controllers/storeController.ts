@@ -553,3 +553,34 @@ export const getAllStores = async (_req: AuthenticatedRequest, res: Response): P
     res.status(500).json({ success: false, message: "Failed to fetch stores" });
   }
 };
+
+export const getAllMerchants = async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const merchants = await findNeonMerchants();
+
+    const stores = merchants.length
+      ? await prisma.stores.findMany({
+        where: { merchant_id: { in: merchants.map((m) => m.id) } },
+        select: { id: true, name: true, slug: true, status: true, merchant_id: true },
+      })
+      : [];
+    const byMerchant = new Map(stores.map((s) => [s.merchant_id, s]));
+
+    res.status(200).json({
+      success: true,
+      merchants: merchants.map((m) => {
+        const store = byMerchant.get(m.id);
+        return {
+          ...m,
+          store_id: store?.id ?? null,
+          store_name: store?.name ?? null,
+          store_slug: store?.slug ?? null,
+          store_status: store?.status ?? null,
+        };
+      }),
+    });
+  } catch (error) {
+    console.error("getAllMerchants error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch merchants" });
+  }
+};
