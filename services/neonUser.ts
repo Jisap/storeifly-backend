@@ -158,9 +158,37 @@ export const findNeonUserByIds = async (ids: string[]): Promise<Record<string, N
   return map;
 }
 
-// All Neon Auth users with the merchant role, newest first.
-// Database errors are thrown so callers can return a 500.
+/**
+ * Devuelve todos los usuarios de Neon Auth con rol "merchant", del más
+ * reciente al más antiguo.
+ *
+ * Es la fuente de datos de `getAllMerchants`. Usa SQL crudo porque la tabla
+ * `neon_auth."user"` no está en tus modelos de Prisma (igual que
+ * `findNeonUserByIds` y `updateNeonUserRole`).
+ *
+ * Si falla la consulta, el error se propaga: quien la llame debe capturarlo
+ * (try/catch) y decidir qué responder, normalmente un 500.
+ *
+ * @returns Array de `NeonUserRecord` (vacío si no hay comerciantes).
+ *          Cada elemento incluye: id, name, email, role, createdAt,
+ *          updatedAt, banned y banExpires.
+ */
 export const findNeonMerchants = async (): Promise<NeonUserRecord[]> => {
+  // No lleva `await` ni `async` interno: `$queryRaw` ya devuelve una
+  // promesa y, al retornarla directamente, la función `async` la
+  // "desenvuelve". Es equivalente a `return await ...`, salvo un detalle:
+  // sin `await`, un error de la consulta no se captura con un try/catch
+  // DENTRO de esta función (aquí no hay ninguno, así que da igual).
+  //
+  // `<NeonUserRecord[]>` le indica a TypeScript la forma de las filas,
+  // pero no la verifica: si cambias el SELECT, actualiza el tipo a mano.
+  //
+  // SQL:
+  //  - `"user"`, `"createdAt"`, `"updatedAt"` y `"banExpires"` llevan comillas
+  //    dobles porque Postgres, si no, los pasaría a minúsculas.
+  //  - `WHERE role = 'merchant'` es un valor fijo escrito en la consulta (no
+  //    viene del usuario), así que no hay riesgo de inyección SQL.
+  //  - `ORDER BY "createdAt" DESC`: los comerciantes más recientes primero.
   return prisma.$queryRaw<NeonUserRecord[]>`
         SELECT id, name, email, role, "createdAt", "updatedAt", banned, "banExpires"
         FROM neon_auth."user"
