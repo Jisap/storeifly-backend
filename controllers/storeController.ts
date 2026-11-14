@@ -631,32 +631,78 @@ export const getAllMerchants = async (_req: AuthenticatedRequest, res: Response)
   }
 };
 
-// Platform Admin: Toggle store status (active / suspended).
-// Send { status } to set it directly, or nothing to flip it.
+/**
+ * Controlador (solo administradores de plataforma): activa o suspende una
+ * tienda.
+ *
+ * Es el único sitio donde se modifica `status`, que el comerciante no puede
+ * cambiar en `updateMyStore` ni elegir en `createStore`. Aquí es donde se
+ * usa `VALID_STATUSES`.
+ *
+ * Tiene dos modos de uso:
+ *  - Con `{ "status": "active" | "suspended" }` en el body: fija ese estado
+ *    directamente (idempotente: repetir la petición da el mismo resultado).
+ *  - Sin body (o sin `status`): invierte el estado actual (active ↔ suspended).
+ *    Este modo NO es idempotente: dos peticiones seguidas lo dejan como estaba.
+ *
+ * IMPORTANTE: este controlador NO comprueba por sí mismo que el usuario sea
+ * admin. Esa restricción debe aplicarla un middleware en la ruta.
+ *
+ * Ruta esperada: PATCH/PUT `/:id` (el id de la tienda va en la URL),
+ * con body JSON opcional.
+ *
+ * Respuestas:
+ *  - 200: `{ success, message, store }` con la tienda ya actualizada.
+ *  - 400: id inválido o `status` no permitido.
+ *  - 404: la tienda no existe.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express (`req.params.id` y `req.body.status`).
+ * @param res - Respuesta de Express.
+ */
 export const toggleStoreStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // El id llega como texto en la URL; se convierte a número porque el
+    // id de la tienda es numérico en la BD (a diferencia de los usuarios,
+    // que usan UUID). Se rechaza todo lo que no sea un entero positivo:
+    // NaN ("abc"), decimales ("1.5"), 0 y negativos.
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       res.status(400).json({ success: false, message: "Invalid store id" });
       return;
     }
 
+    // Estado pedido por el cliente (opcional). Si viene, debe estar en la
+    // lista blanca. Se compara con `undefined` para distinguir "no enviado"
+    // (modo invertir) de "enviado con valor inválido" (error 400); un
+    // `null` o `""` sí se rechaza como inválido.
     const requested = req.body?.status;
     if (requested !== undefined && !VALID_STATUSES.includes(requested)) {
       res.status(400).json({ success: false, message: 'status must be "active" or "suspended"' });
       return;
     }
 
+    // Lee el estado actual. Solo se seleccionan `id` y `status`, que es lo
+    // único necesario. `findUnique` devuelve `null` si no existe.
     const store = await prisma.stores.findUnique({ where: { id }, select: { id: true, status: true } });
     if (!store) {
       res.status(404).json({ success: false, message: "Store not found" });
       return;
     }
 
+    // Estado final: el pedido, o si no se pidió ninguno, el contrario al
+    // actual. Nota: cualquier estado distinto de "active" se considera
+    // "suspended" al invertir, así que un valor inesperado en la BD pasaría
+    // a "active".
     const status = requested ?? (store.status === "active" ? "suspended" : "active");
+
+    // Guarda el nuevo estado y devuelve la tienda completa actualizada.
     const updated = await prisma.stores.update({ where: { id }, data: { status } });
+
+    // El mensaje se genera según el estado FINAL, no según lo pedido.
     res.status(200).json({ success: true, message: `Store has been ${status === "active" ? "activated" : "suspended"}`, store: updated });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("toggleStoreStatus error:", error);
     res.status(500).json({ success: false, message: "Failed to update store status" });
   }
