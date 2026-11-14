@@ -492,3 +492,27 @@ export const updateMyStore = async (req: AuthenticatedRequest, res: Response): P
     res.status(500).json({ success: false, message: "Failed to update store" });
   }
 };
+
+// Platform Admin: get all stores with stats
+export const getAllStores = async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const stores = await prisma.stores.findMany({
+      orderBy: { created_at: "desc" },
+      include: { _count: { select: { products: true, orders: true, categories: true } } },
+    });
+
+    // Merchants live in Neon Auth, not in Prisma, so look them up separately
+    const users = await findNeonUserByIds(stores.map((s) => s.merchant_id).filter((id): id is string => !!id));
+
+    res.status(200).json({
+      success: true,
+      stores: stores.map((s) => {
+        const m = s.merchant_id ? users[s.merchant_id] : undefined;
+        return { ...s, merchant: m ? { id: m.id, name: m.name, email: m.email } : null };
+      }),
+    });
+  } catch (error) {
+    console.error("getAllStores error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch stores" });
+  }
+};
