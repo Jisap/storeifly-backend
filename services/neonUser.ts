@@ -101,17 +101,56 @@ export const updateNeonUserRole = async (userId: string, role: string): Promise<
   }
 };
 
-// Looks up many Neon Auth users at once. Returns { [id]: user }.
-// Database errors are thrown so callers can return a 500.
+/**
+ * Busca varios usuarios de Neon Auth a la vez, con UNA sola consulta SQL.
+ *
+ * Devuelve un diccionario indexado por id de usuario, no un array:
+ *   { "uuid-1": { id, name, email, ... }, "uuid-2": { ... } }
+ * Así quien la llama puede acceder directamente con `users[id]` (es lo que
+ * hace `getAllStores`, lo que confirma que mi suposición de las notas
+ * anteriores era correcta).
+ *
+ * Los ids que no existan en la tabla simplemente no aparecen en el
+ * resultado; no se lanza ningún error por ello.
+ *
+ * Si falla la consulta (conexión, UUID con formato inválido...), el error
+ * se propaga: el llamador debe capturarlo (try/catch) y decidir qué
+ * responder, normalmente un 500.
+ *
+ * @param ids - Lista de ids de usuario (UUID). Admite duplicados y valores vacíos.
+ * @returns Diccionario `{ [id]: NeonUserRecord }`. Vacío si no hay ids válidos.
+ */
 export const findNeonUserByIds = async (ids: string[]): Promise<Record<string, NeonUserRecord>> => {
+  // Limpia la entrada:
+  //  - `ids ?? []`: si llega null/undefined, se usa un array vacío.
+  //  - `.filter(Boolean)`: descarta valores vacíos ("" , null, undefined).
+  //  - `new Set(...)`: elimina duplicados.
+  //  - `Array.from(...)`: convierte el Set de nuevo en array.
   const uniqueIds = Array.from(new Set((ids ?? []).filter(Boolean)));
+
+  // Atajo: sin ids no se consulta la BD (ahorra una consulta inútil).
   if (uniqueIds.length === 0) return {};
 
+  // Consulta SQL cruda (la tabla `neon_auth."user"` no está en tus modelos
+  // de Prisma). `<NeonUserRecord[]>` le dice a TypeScript la forma de las
+  // filas, pero es solo una promesa: TypeScript NO verifica que las
+  // columnas devueltas coincidan realmente con ese tipo.
+  //
+  // SEGURIDAD: es una "tagged template", así que `${uniqueIds}` se envía
+  // como parámetro preparado, no concatenado (sin riesgo de inyección SQL).
+  //
+  // `= ANY(${uniqueIds}::uuid[])`: Postgres compara el id con cualquier
+  // elemento del array, y es el equivalente a `IN (...)` con una lista de
+  // tamaño variable. `::uuid[]` convierte el array de textos a array de UUID.
+  // Los nombres con mayúsculas ("createdAt", "banExpires") van entre comillas
+  // dobles porque, si no, Postgres los pasaría a minúsculas.
   const rows = await prisma.$queryRaw<NeonUserRecord[]>`
         SELECT id, name, email, role, "createdAt", "updatedAt", banned, "banExpires"
         FROM neon_auth."user"
         WHERE id = ANY(${uniqueIds}::uuid[])`;
 
+  // Convierte el array de filas en un diccionario id → usuario para que
+  // el acceso posterior sea directo, sin buscar en el array cada vez.
   const map: Record<string, NeonUserRecord> = {};
   for (const row of rows) {
     map[row.id] = row;
