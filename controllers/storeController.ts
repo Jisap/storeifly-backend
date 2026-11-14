@@ -1,7 +1,7 @@
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
-import { updateNeonUserRole, findNeonUserByIds } from "../services/neonUser.js";
+import { updateNeonUserRole, findNeonUserByIds, findNeonMerchants } from "../services/neonUser.js";
 
 /**
  * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,

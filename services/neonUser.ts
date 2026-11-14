@@ -157,3 +157,13 @@ export const findNeonUserByIds = async (ids: string[]): Promise<Record<string, N
   }
   return map;
 }
+
+// All Neon Auth users with the merchant role, newest first.
+// Database errors are thrown so callers can return a 500.
+export const findNeonMerchants = async (): Promise<NeonUserRecord[]> => {
+  return prisma.$queryRaw<NeonUserRecord[]>`
+        SELECT id, name, email, role, "createdAt", "updatedAt", banned, "banExpires"
+        FROM neon_auth."user"
+        WHERE role = 'merchant'
+        ORDER BY "createdAt" DESC`;
+}
