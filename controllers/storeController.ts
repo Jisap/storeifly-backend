@@ -630,3 +630,34 @@ export const getAllMerchants = async (_req: AuthenticatedRequest, res: Response)
     res.status(500).json({ success: false, message: "Failed to fetch merchants" });
   }
 };
+
+// Platform Admin: Toggle store status (active / suspended).
+// Send { status } to set it directly, or nothing to flip it.
+export const toggleStoreStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ success: false, message: "Invalid store id" });
+      return;
+    }
+
+    const requested = req.body?.status;
+    if (requested !== undefined && !VALID_STATUSES.includes(requested)) {
+      res.status(400).json({ success: false, message: 'status must be "active" or "suspended"' });
+      return;
+    }
+
+    const store = await prisma.stores.findUnique({ where: { id }, select: { id: true, status: true } });
+    if (!store) {
+      res.status(404).json({ success: false, message: "Store not found" });
+      return;
+    }
+
+    const status = requested ?? (store.status === "active" ? "suspended" : "active");
+    const updated = await prisma.stores.update({ where: { id }, data: { status } });
+    res.status(200).json({ success: true, message: `Store has been ${status === "active" ? "activated" : "suspended"}`, store: updated });
+  } catch (error) {
+    console.error("toggleStoreStatus error:", error);
+    res.status(500).json({ success: false, message: "Failed to update store status" });
+  }
+};
