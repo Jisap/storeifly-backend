@@ -554,24 +554,69 @@ export const getAllStores = async (_req: AuthenticatedRequest, res: Response): P
   }
 };
 
+/**
+ * Controlador (solo administradores de plataforma): lista TODOS los
+ * comerciantes (usuarios con rol "merchant") junto con los datos básicos
+ * de su tienda, si la tienen.
+ *
+ * Es la vista inversa de `getAllStores`: allí se parte de las tiendas y se
+ * busca al comerciante; aquí se parte de los comerciantes y se busca su tienda.
+ * Por eso aparecen comerciantes SIN tienda (los que pasaron por
+ * `onboardMerchant` pero no han llamado a `createStore`), con los campos
+ * `store_*` a `null`.
+ *
+ * Para cada comerciante devuelve todos los campos que entregue
+ * `findNeonMerchants`, más:
+ *  - `store_id`, `store_name`, `store_slug`, `store_status`
+ *    (`null` si todavía no tiene tienda).
+ *
+ * IMPORTANTE: este controlador NO comprueba por sí mismo que el usuario sea
+ * admin. Esa restricción debe aplicarla un middleware en la ruta.
+ *
+ * Ruta esperada: GET sin body ni parámetros.
+ *
+ * Respuestas:
+ *  - 200: `{ success: true, merchants: [...] }`
+ *  - 500: error inesperado (BD, fallo al consultar Neon Auth...).
+ *
+ * @param _req - Petición (el guion bajo indica que no se usa).
+ * @param res  - Respuesta de Express.
+ */
 export const getAllMerchants = async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Obtiene los usuarios con rol merchant desde Neon Auth (no están en
+    // los modelos de Prisma, igual que en `findNeonUserByIds`).
     const merchants = await findNeonMerchants();
 
+    // Busca las tiendas de esos comerciantes en UNA sola consulta
+    // (`in: [...]`), evitando una consulta por comerciante (N+1).
+    // Si no hay comerciantes se salta la consulta: `in: []` no daría
+    // error, pero sería trabajo inútil. Solo se seleccionan los campos
+    // necesarios (no la tienda completa).
     const stores = merchants.length
       ? await prisma.stores.findMany({
         where: { merchant_id: { in: merchants.map((m) => m.id) } },
         select: { id: true, name: true, slug: true, status: true, merchant_id: true },
       })
       : [];
+
+    // Diccionario merchant_id → tienda para acceso directo.
+    // Usa `Map` (no objeto) porque `merchant_id` puede ser `string | null`
+    // según el esquema. Si un comerciante tuviera varias tiendas, solo
+    // se conservaría la ÚLTIMA (las anteriores se sobrescriben).
     const byMerchant = new Map(stores.map((s) => [s.merchant_id, s]));
 
     res.status(200).json({
       success: true,
+      // Une cada comerciante con los datos de su tienda.
       merchants: merchants.map((m) => {
         const store = byMerchant.get(m.id);
         return {
+          // Todos los campos del comerciante (ver nota sobre qué incluye).
           ...m,
+          // Se "aplanan" los datos de la tienda con prefijo `store_`.
+          // `?? null` garantiza que la clave exista en el JSON aunque
+          // no haya tienda (con `undefined` se omitiría).
           store_id: store?.id ?? null,
           store_name: store?.name ?? null,
           store_slug: store?.slug ?? null,
@@ -580,6 +625,7 @@ export const getAllMerchants = async (_req: AuthenticatedRequest, res: Response)
       }),
     });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getAllMerchants error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch merchants" });
   }
