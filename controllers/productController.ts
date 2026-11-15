@@ -237,3 +237,33 @@ const parseProductInput = async (body: any, storeId: number, partial: boolean): 
   // Todo correcto: se devuelven los datos validados.
   return { data };
 }
+
+// Create a product in the merchant's store
+export const createProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const store = await getMerchantStore(req.user!.id);
+    if (!store) {
+      res.status(404).json({ success: false, message: "You must create a store before adding products" });
+      return;
+    }
+
+    const parsed = await parseProductInput(req.body, store.id, false);
+    if ("error" in parsed) {
+      res.status(400).json({ success: false, message: parsed.error });
+      return;
+    }
+
+    const product = await prisma.products.create({
+      data: {
+        ...parsed.data,
+        name: parsed.data.name,
+        price: parsed.data.price,
+        store_id: store.id,
+      },
+    });
+    res.status(201).json({ success: true, message: "Product created successfully", product });
+  } catch (error) {
+    console.error("createProduct error:", error);
+    res.status(500).json({ success: false, message: "Failed to create product" });
+  }
+}
