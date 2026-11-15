@@ -308,40 +308,82 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
   }
 }
 
-// Update a product (only if it belongs to the merchant's store)
+/**
+ * Controlador: actualiza un producto de la tienda del comerciante autenticado.
+ *
+ * Seguridad (propiedad del recurso): el id del producto llega por la URL,
+ * pero el producto solo se acepta si pertenece a la tienda del usuario
+ * (`where: { id, store_id: store.id }`). Un producto de otra tienda se
+ * trata como "no encontrado" (404), sin revelar que existe.
+ *
+ * Es una actualización parcial: solo se modifican los campos que vengan en
+ * el body. Los campos admitidos son los de `parseProductInput`. `store_id`,
+ * `id` y similares se ignoran, así que un producto no puede cambiarse de tienda.
+ *
+ * Ruta esperada: PUT/PATCH `/:id` con body JSON. Requiere autenticación.
+ *
+ * Flujo:
+ *  1. Valida el id de la URL.
+ *  2. Localiza la tienda del usuario.
+ *  3. Comprueba que el producto existe Y es de esa tienda.
+ *  4. Valida el body en modo parcial.
+ *  5. Actualiza y devuelve el producto.
+ *
+ * Respuestas:
+ *  - 200: `{ success, message, product }` con el producto ya actualizado.
+ *  - 400: id inválido, campo inválido o ningún campo válido que actualizar.
+ *  - 404: el usuario no tiene tienda, o el producto no existe en su tienda.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express (`req.params.id` y body).
+ * @param res - Respuesta de Express.
+ */
 export const updateProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id del producto desde la URL. `parseId` devuelve null si no es un
+    // entero positivo ("abc", 0, "1.5"...).
     const id = parseId(req.params.id);
     if (!id) {
       res.status(400).json({ success: false, message: "Invalid product id" });
       return;
     }
 
+    // Tienda del usuario autenticado (`!` asume que `requireAuth` ya corrió).
     const store = await getMerchantStore(req.user!.id);
     if (!store) {
       res.status(404).json({ success: false, message: "You have not created a store yet" });
       return;
     }
 
+    // COMPROBACIÓN DE PROPIEDAD: se busca por `id` Y `store_id`. Si el
+    // producto existe pero es de otra tienda, no se encuentra. Solo se
+    // selecciona `id` porque únicamente interesa saber si existe.
     const existing = await prisma.products.findFirst({ where: { id, store_id: store.id }, select: { id: true } });
     if (!existing) {
       res.status(404).json({ success: false, message: "Product not found" });
       return;
     }
 
+    // Valida el body en modo parcial (`true`): todo es opcional. Se pasa
+    // `store.id` para validar `category_id` contra esta tienda.
     const parsed = await parseProductInput(req.body, store.id, true);
     if ("error" in parsed) {
       res.status(400).json({ success: false, message: parsed.error });
       return;
     }
+
+    // Body sin ningún campo reconocido: no se ejecuta un `update` vacío.
     if (Object.keys(parsed.data).length === 0) {
       res.status(400).json({ success: false, message: "No valid fields to update" });
       return;
     }
 
+    // Actualiza solo los campos validados. Aquí `where` usa solo `id`
+    // porque la propiedad ya se verificó arriba (ver notas).
     const product = await prisma.products.update({ where: { id }, data: parsed.data });
     res.status(200).json({ success: true, message: "Product updated successfully", product });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("updateProduct error:", error);
     res.status(500).json({ success: false, message: "Failed to update product" });
   }
