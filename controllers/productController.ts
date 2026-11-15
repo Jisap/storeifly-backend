@@ -307,3 +307,42 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
     res.status(500).json({ success: false, message: "Failed to create product" });
   }
 }
+
+// Update a product (only if it belongs to the merchant's store)
+export const updateProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) {
+      res.status(400).json({ success: false, message: "Invalid product id" });
+      return;
+    }
+
+    const store = await getMerchantStore(req.user!.id);
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    const existing = await prisma.products.findFirst({ where: { id, store_id: store.id }, select: { id: true } });
+    if (!existing) {
+      res.status(404).json({ success: false, message: "Product not found" });
+      return;
+    }
+
+    const parsed = await parseProductInput(req.body, store.id, true);
+    if ("error" in parsed) {
+      res.status(400).json({ success: false, message: parsed.error });
+      return;
+    }
+    if (Object.keys(parsed.data).length === 0) {
+      res.status(400).json({ success: false, message: "No valid fields to update" });
+      return;
+    }
+
+    const product = await prisma.products.update({ where: { id }, data: parsed.data });
+    res.status(200).json({ success: true, message: "Product updated successfully", product });
+  } catch (error) {
+    console.error("updateProduct error:", error);
+    res.status(500).json({ success: false, message: "Failed to update product" });
+  }
+}
