@@ -238,15 +238,46 @@ const parseProductInput = async (body: any, storeId: number, partial: boolean): 
   return { data };
 }
 
-// Create a product in the merchant's store
+/**
+ * Controlador: crea un producto en la tienda del comerciante autenticado.
+ *
+ * La tienda se obtiene de `req.user.id` (con `getMerchantStore`), nunca de un
+ * id enviado por el cliente. Así un comerciante solo puede añadir productos a
+ * SU tienda.
+ *
+ * Ruta esperada: POST con body JSON. Requiere autenticación (y, según la ruta,
+ * rol "merchant"). Campos: los de `parseProductInput`, con `name` y `price`
+ * obligatorios.
+ *
+ * Flujo:
+ *  1. Localiza la tienda del usuario (404 si aún no tiene).
+ *  2. Valida y limpia el body (`parseProductInput(body, store.id, false)`).
+ *  3. Crea el producto asignándole el `store_id` desde el servidor.
+ *
+ * Respuestas:
+ *  - 201: `{ success, message, product }` con el producto creado.
+ *  - 400: algún campo inválido (mensaje del primer error).
+ *  - 404: el usuario todavía no tiene tienda.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express con el body descrito arriba.
+ * @param res - Respuesta de Express.
+ */
 export const createProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Tienda del usuario autenticado. `!` asume que `req.user` existe
+    // (la ruta debe estar protegida por `requireAuth`). Devuelve `null`
+    // si el usuario no ha creado su tienda.
     const store = await getMerchantStore(req.user!.id);
     if (!store) {
       res.status(404).json({ success: false, message: "You must create a store before adding products" });
       return;
     }
 
+    // Valida el body en modo creación (`false`): `name` y `price` son
+    // obligatorios. Se pasa `store.id` para que, si viene `category_id`,
+    // se compruebe que la categoría es de esta tienda.
+    // `"error" in parsed` distingue las dos formas del union type.
     const parsed = await parseProductInput(req.body, store.id, false);
     if ("error" in parsed) {
       res.status(400).json({ success: false, message: parsed.error });
@@ -255,14 +286,23 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
 
     const product = await prisma.products.create({
       data: {
+        // Campos validados (solo los de la lista blanca).
         ...parsed.data,
+        // Redundantes con el spread (ya vienen en `parsed.data`), pero
+        // dejan claro qué campos son obligatorios y evitan errores de
+        // tipos, ya que `data` es `Record<string, any>`.
         name: parsed.data.name,
         price: parsed.data.price,
+        // Va AL FINAL a propósito: lo fija el servidor y el cliente no
+        // puede sobrescribirlo (aunque `parseProductInput` ya lo ignora).
         store_id: store.id,
       },
     });
+
+    // Se devuelve el registro completo del producto creado.
     res.status(201).json({ success: true, message: "Product created successfully", product });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("createProduct error:", error);
     res.status(500).json({ success: false, message: "Failed to create product" });
   }
