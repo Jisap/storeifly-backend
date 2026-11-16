@@ -195,3 +195,10 @@ export const findNeonMerchants = async (): Promise<NeonUserRecord[]> => {
         WHERE role = 'merchant'
         ORDER BY "createdAt" DESC`;
 }
+
+// True only if the user has confirmed they own their email address
+export const isNeonEmailVerified = async (userId: string): Promise<boolean> => {
+  const rows = await prisma.$queryRaw<{ emailVerified: boolean | null }[]>`
+        SELECT "emailVerified" FROM neon_auth."user" WHERE id = ${userId}::uuid LIMIT 1`;
+  return rows[0]?.emailVerified === true;
+}
