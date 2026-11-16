@@ -131,3 +131,17 @@ const generateOrderNumber = () => {
     // letra del alfabeto; `join("")` las une en un solo string.
     return "ORD-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
+
+// The address can be one line of text or an object of text fields
+const parseShippingAddress = (value: unknown): string | Record<string, string> | null => {
+    if (typeof value === "string") {
+        return value.trim() && value.length <= 500 ? value.trim() : null;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        const entries = Object.entries(value);
+        if (entries.length === 0 || entries.length > 10) return null;
+        if (!entries.every(([, v]) => typeof v === "string" && v.length <= 200)) return null;
+        return Object.fromEntries(entries.map(([k, v]) => [k.slice(0, 50), (v as string).trim()]));
+    }
+    return null;
+}
