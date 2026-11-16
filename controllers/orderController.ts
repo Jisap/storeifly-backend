@@ -132,16 +132,58 @@ const generateOrderNumber = () => {
     return "ORD-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
 
-// The address can be one line of text or an object of text fields
+/**
+ * Valida y normaliza la dirección de envío de un pedido.
+ *
+ * Acepta DOS formatos, y devuelve el mismo tipo que recibe:
+ *  1. Una sola línea de texto:
+ *       "Calle Mayor 5, 29001 Málaga"
+ *  2. Un objeto con campos de texto (hasta 10), por ejemplo:
+ *       { street: "Calle Mayor 5", city: "Málaga", zip: "29001" }
+ *
+ * Reglas:
+ *  - String: no vacío (ni solo espacios) y máx. 500 caracteres. Se
+ *    devuelve ya sin espacios en los extremos.
+ *  - Objeto: entre 1 y 10 campos; TODOS los valores deben ser strings de
+ *    máx. 200 caracteres. Los valores se recortan con `trim()` y las
+ *    claves se truncan a 50 caracteres.
+ *  - Cualquier otra cosa (null, número, array, objeto vacío...) → `null`.
+ *
+ * Por qué hay límites: la dirección llega del cliente y se guardará
+ * (probablemente en una columna JSON o de texto). Los máximos evitan que
+ * alguien guarde cantidades enormes de datos en cada pedido.
+ *
+ * @param value - Valor recibido del cliente (normalmente `req.body.shipping_address`).
+ * @returns El string o el objeto limpio, o `null` si no es válido. Quien la
+ *          llame debe comprobar el `null` y responder 400.
+ */
 const parseShippingAddress = (value: unknown): string | Record<string, string> | null => {
+    // CASO 1: texto. `value.trim() && ...` es falsy si queda vacío tras
+    // recortar. La longitud se comprueba sobre el valor SIN recortar, así
+    // que un texto de 500 caracteres + espacios finales se rechaza.
     if (typeof value === "string") {
         return value.trim() && value.length <= 500 ? value.trim() : null;
     }
+
+    // CASO 2: objeto "plano". `value &&` descarta null (typeof null === "object")
+    // y `!Array.isArray` descarta arrays, que también son objetos en JS.
     if (value && typeof value === "object" && !Array.isArray(value)) {
+        // Convierte el objeto en pares [clave, valor] para validarlos.
         const entries = Object.entries(value);
+
+        // Sin campos, o demasiados: se rechaza.
         if (entries.length === 0 || entries.length > 10) return null;
+
+        // TODOS los valores deben ser strings cortos. Un solo valor inválido
+        // (número, objeto anidado, texto largo...) invalida la dirección entera.
         if (!entries.every(([, v]) => typeof v === "string" && v.length <= 200)) return null;
+
+        // Reconstruye el objeto limpio: claves truncadas a 50 caracteres y
+        // valores recortados. `(v as string)` es seguro porque el `every`
+        // anterior ya comprobó que son strings; TypeScript no lo infiere.
         return Object.fromEntries(entries.map(([k, v]) => [k.slice(0, 50), (v as string).trim()]));
     }
+
+    // Cualquier otro tipo (número, boolean, null, undefined, array...).
     return null;
 }
