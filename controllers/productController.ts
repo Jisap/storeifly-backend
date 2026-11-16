@@ -388,3 +388,30 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
     res.status(500).json({ success: false, message: "Failed to update product" });
   }
 }
+
+// Delete a product (only if it belongs to the merchant's store)
+export const deleteProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) {
+      res.status(400).json({ success: false, message: "Invalid product id" });
+      return;
+    }
+
+    const store = await getMerchantStore(req.user!.id);
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    const result = await prisma.products.deleteMany({ where: { id, store_id: store.id } });
+    if (result.count === 0) {
+      res.status(404).json({ success: false, message: "Product not found" });
+      return;
+    }
+    res.status(200).json({ success: true, message: "Product deleted successfully" });
+  } catch (error) {
+    console.error("deleteProduct error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete product" });
+  }
+}
