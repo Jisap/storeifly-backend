@@ -196,9 +196,48 @@ export const findNeonMerchants = async (): Promise<NeonUserRecord[]> => {
         ORDER BY "createdAt" DESC`;
 }
 
-// True only if the user has confirmed they own their email address
+/**
+ * Comprueba si un usuario ha confirmado que es dueño de su email.
+ *
+ * Lee la columna `"emailVerified"` de `neon_auth."user"`. Usa SQL crudo
+ * porque esa tabla no está en tus modelos de Prisma (igual que
+ * `updateNeonUserRole`, `findNeonUserByIds` y `findNeonMerchants`).
+ *
+ * Es una comprobación "segura por defecto": solo devuelve `true` si el
+ * valor es exactamente `true`. Devuelve `false` en todos estos casos:
+ *  - El usuario no existe (`rows[0]` es `undefined`).
+ *  - `emailVerified` es `false`.
+ *  - `emailVerified` es `NULL` (la columna admite nulos).
+ *
+ * Se usa en el flujo de pedidos para exigir un email verificado antes de
+ * permitir una compra.
+ *
+ * Si la consulta falla (conexión, UUID inválido...), el error se propaga:
+ * quien la llame debe capturarlo con try/catch y decidir qué responder
+ * (normalmente un 500).
+ *
+ * @param userId - Id del usuario (UUID) en `neon_auth."user"`.
+ * @returns `true` si el email está verificado; `false` en cualquier otro caso.
+ */
 export const isNeonEmailVerified = async (userId: string): Promise<boolean> => {
+  // `$queryRaw` ejecuta SQL que devuelve filas. El tipo genérico indica la
+  // forma de cada fila (`emailVerified` puede ser boolean o null), pero
+  // TypeScript no lo verifica contra la BD.
+  //
+  // SEGURIDAD: al ser una "tagged template" (backticks), `${userId}` se
+  // envía como parámetro preparado, sin riesgo de inyección SQL.
+  //
+  // SQL:
+  //  - `"emailVerified"` y `"user"` van entre comillas dobles porque, si
+  //    no, Postgres los pasaría a minúsculas / chocaría con palabra reservada.
+  //  - `${userId}::uuid` convierte el texto a UUID; si el formato es
+  //    inválido, Postgres lanza un error.
+  //  - `LIMIT 1` es una precaución: el id es único, pero así la consulta
+  //    nunca devuelve más de una fila.
   const rows = await prisma.$queryRaw<{ emailVerified: boolean | null }[]>`
         SELECT "emailVerified" FROM neon_auth."user" WHERE id = ${userId}::uuid LIMIT 1`;
+
+  // `rows[0]?.` evita un error si no hay filas. La comparación estricta
+  // `=== true` hace que `null` y `undefined` cuenten como no verificado.
   return rows[0]?.emailVerified === true;
 }
