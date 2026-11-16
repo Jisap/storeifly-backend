@@ -389,28 +389,64 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
   }
 }
 
-// Delete a product (only if it belongs to the merchant's store)
+/**
+ * Controlador: elimina un producto de la tienda del comerciante autenticado.
+ *
+ * Seguridad (propiedad del recurso): el id llega por la URL, pero el borrado
+ * solo afecta a productos cuyo `store_id` es el de la tienda del usuario. Un
+ * producto de otra tienda se trata como "no encontrado" (404), sin revelar
+ * que existe.
+ *
+ * A diferencia de `updateProduct`, aquí la comprobación de propiedad y el
+ * borrado se hacen en UNA sola operación atómica (`deleteMany` con
+ * `id` + `store_id`), sin hueco entre comprobar y actuar.
+ *
+ * El borrado es DEFINITIVO (no hay "papelera"). Si prefieres conservar el
+ * historial, existe el estado "archived" en `VALID_STATUSES`.
+ *
+ * Ruta esperada: DELETE `/:id`, sin body. Requiere autenticación.
+ *
+ * Respuestas:
+ *  - 200: `{ success, message }`
+ *  - 400: id inválido.
+ *  - 404: el usuario no tiene tienda, o el producto no existe en su tienda.
+ *  - 500: error inesperado (incluye fallos de integridad referencial, ver notas).
+ *
+ * @param req - Petición autenticada de Express (`req.params.id`).
+ * @param res - Respuesta de Express.
+ */
 export const deleteProduct = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id del producto desde la URL. `parseId` devuelve null si no es un
+    // entero positivo ("abc", 0, "1.5"...).
     const id = parseId(req.params.id);
     if (!id) {
       res.status(400).json({ success: false, message: "Invalid product id" });
       return;
     }
 
+    // Tienda del usuario autenticado (`!` asume que `requireAuth` ya corrió).
     const store = await getMerchantStore(req.user!.id);
     if (!store) {
       res.status(404).json({ success: false, message: "You have not created a store yet" });
       return;
     }
 
+    // Se usa `deleteMany` (y no `delete`) a propósito: `delete` solo admite
+    // claves únicas en el `where` y lanzaría un error si no encuentra nada.
+    // `deleteMany` permite filtrar por `id` Y `store_id` a la vez y devuelve
+    // `{ count }` con las filas borradas, sin lanzar error si son 0.
     const result = await prisma.products.deleteMany({ where: { id, store_id: store.id } });
+
+    // count === 0: el producto no existe o es de otra tienda. Ambos casos
+    // dan el mismo 404, para no filtrar información.
     if (result.count === 0) {
       res.status(404).json({ success: false, message: "Product not found" });
       return;
     }
     res.status(200).json({ success: true, message: "Product deleted successfully" });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("deleteProduct error:", error);
     res.status(500).json({ success: false, message: "Failed to delete product" });
   }
