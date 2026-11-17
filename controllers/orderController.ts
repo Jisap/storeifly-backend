@@ -511,3 +511,56 @@ export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response
     res.status(500).json({ success: false, message: "Failed to fetch orders" });
   }
 }
+
+// Merchant: change an order's status. Cancelling puts the stock back.
+export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) {
+      res.status(400).json({ success: false, message: "Invalid order id" });
+      return;
+    }
+
+    const status = req.body?.status;
+    if (!ORDER_STATUSES.includes(status)) {
+      res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
+      return;
+    }
+
+    const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    const order = await prisma.orders.findFirst({ where: { id, store_id: store.id }, select: { id: true, order_status: true, items: true } });
+    if (!order) {
+      res.status(404).json({ success: false, message: "Order not found" });
+      return;
+    }
+    if (order.order_status === "cancelled") {
+      res.status(400).json({ success: false, message: "Cancelled orders can't be changed" });
+      return;
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (status === "cancelled") {
+        const items = Array.isArray(order.items) ? (order.items as any[]) : [];
+        for (const item of items) {
+          const productId = parseId(item?.product_id);
+          const quantity = Number(item?.quantity);
+          if (productId && Number.isInteger(quantity) && quantity > 0) {
+            // updateMany: the product may have been deleted since
+            await tx.products.updateMany({ where: { id: productId }, data: { stock: { increment: quantity } } });
+          }
+        }
+      }
+      return tx.orders.update({ where: { id }, data: { order_status: status } });
+    });
+
+    res.status(200).json({ success: true, message: `Order is now ${status}`, order: updated });
+  } catch (error) {
+    console.error("updateOrderStatus error:", error);
+    res.status(500).json({ success: false, message: "Failed to update order status" });
+  }
+}
