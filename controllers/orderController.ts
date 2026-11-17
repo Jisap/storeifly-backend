@@ -188,16 +188,67 @@ const parseShippingAddress = (value: unknown): string | Record<string, string> |
     return null;
 }
 
-// Combines duplicate products and checks quantities: [{ productId, quantity }]
+/**
+ * Valida la lista de productos de un pedido y la normaliza a un `Map`
+ * `productId → cantidad`, fusionando los productos repetidos.
+ *
+ * Entrada esperada (`req.body.items`):
+ *   [
+ *     { productId: 5, quantity: 2 },
+ *     { product_id: 8, quantity: 1 },   // también acepta snake_case
+ *     { productId: 5, quantity: 3 }     // repetido: se suma al anterior
+ *   ]
+ *
+ * Salida del ejemplo: Map { 5 → 5, 8 → 1 }
+ *
+ * Reglas:
+ *  - Debe ser un array con entre 1 y MAX_LINE_ITEMS elementos (50).
+ *  - Cada elemento necesita un id de producto válido (entero > 0) y una
+ *    cantidad entera entre 1 y MAX_QUANTITY (100).
+ *  - Si el mismo producto aparece varias veces, las cantidades se SUMAN, y
+ *    el total no puede superar MAX_QUANTITY.
+ *  - Cualquier fallo invalida TODO el pedido (devuelve `null`).
+ *
+ * Por qué un `Map`: evita que un cliente envíe el mismo producto en varias
+ * líneas para saltarse el límite de cantidad o confundir la comprobación de
+ * stock. Con un `Map`, cada producto aparece una sola vez.
+ *
+ * IMPORTANTE: el cliente solo envía ids y cantidades, NUNCA precios. Los
+ * precios deben leerse de la BD dentro del checkout; si no, cualquiera
+ * podría comprar a 0 €.
+ *
+ * @param value - Valor recibido del cliente (normalmente `req.body.items`).
+ * @returns `Map<number, number>` con los productos y cantidades, o `null`
+ *          si no es válido. Quien la llame debe comprobar el `null` y
+ *          responder 400.
+ */
 const parseItems = (value: unknown): Map<number, number> | null => {
+    // Debe ser un array no vacío y con un máximo de líneas.
     if (!Array.isArray(value) || value.length === 0 || value.length > MAX_LINE_ITEMS) return null;
+
+    // Aquí se acumulan los productos ya fusionados.
     const items = new Map<number, number>();
+
     for (const item of value) {
+        // Acepta `productId` o `product_id`. `item?.` evita un error si el
+        // elemento es null/undefined (en ese caso `parseId` devuelve null).
         const productId = parseId(item?.productId ?? item?.product_id);
+
+        // `Number()` acepta 2 y "2". Ojo: `Number(undefined)` es NaN y
+        // `Number(null)` es 0; ambos se rechazan en la comprobación siguiente.
         const quantity = Number(item?.quantity);
+
+        // Id inválido, cantidad no entera, menor que 1 o mayor que el máximo:
+        // se rechaza el pedido entero.
         if (!productId || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) return null;
+
+        // Si el producto ya estaba, se suma; si no, `?? 0` parte de cero.
         items.set(productId, (items.get(productId) ?? 0) + quantity);
     }
+
+    // Segunda comprobación: tras fusionar duplicados, la suma puede superar
+    // el máximo aunque cada línea individual fuera válida (ej. 60 + 60).
     for (const qty of items.values()) if (qty > MAX_QUANTITY) return null;
+
     return items;
 }
