@@ -512,54 +512,110 @@ export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response
   }
 }
 
-// Merchant: change an order's status. Cancelling puts the stock back.
+/**
+ * Controlador: cambia el estado de un pedido de la tienda del comerciante
+ * autenticado. Si el nuevo estado es "cancelled", devuelve el stock de los
+ * productos del pedido.
+ *
+ * Es la pieza que cierra el ciclo que dejó abierto `createOrder`: allí el
+ * stock se descuenta al comprar; aquí se repone al cancelar.
+ *
+ * Seguridad (propiedad del recurso): el id del pedido llega por la URL, pero
+ * solo se acepta si pertenece a la tienda del usuario (`id` + `store_id`).
+ * Un pedido de otra tienda se trata como "no encontrado" (404).
+ *
+ * Reglas de negocio:
+ *  - El nuevo estado debe estar en `ORDER_STATUSES`.
+ *  - Un pedido CANCELADO es definitivo: no puede cambiar a ningún otro
+ *    estado. Evita reponer el stock dos veces o "resucitar" un pedido cuyo
+ *    stock ya se devolvió.
+ *  - Cualquier otra transición se permite (por ejemplo, de "delivered" a
+ *    "pending"); no hay una máquina de estados estricta (ver notas).
+ *
+ * Ruta esperada: PATCH/PUT `/:id/status` con body JSON `{ "status": "shipped" }`.
+ * Requiere autenticación (y, según la ruta, rol "merchant").
+ *
+ * Respuestas:
+ *  - 200: `{ success, message, order }` con el pedido actualizado.
+ *  - 400: id inválido, `status` no válido o pedido ya cancelado.
+ *  - 404: el usuario no tiene tienda, o el pedido no existe en su tienda.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express (`req.params.id` y `req.body.status`).
+ * @param res - Respuesta de Express.
+ */
 export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id del pedido desde la URL (`parseId` devuelve null si no es un
+    // entero positivo).
     const id = parseId(req.params.id);
     if (!id) {
       res.status(400).json({ success: false, message: "Invalid order id" });
       return;
     }
 
+    // Nuevo estado pedido. `req.body?.status` es `any`, así que `includes`
+    // compila; un valor no string (número, objeto, undefined) simplemente
+    // no está en la lista y da 400.
     const status = req.body?.status;
     if (!ORDER_STATUSES.includes(status)) {
       res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
       return;
     }
 
+    // Tienda del usuario autenticado (`!` asume que `requireAuth` ya corrió).
     const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
     if (!store) {
       res.status(404).json({ success: false, message: "You have not created a store yet" });
       return;
     }
 
+    // COMPROBACIÓN DE PROPIEDAD: se busca por `id` Y `store_id`. Se
+    // seleccionan `order_status` (para la regla de cancelado) e `items`
+    // (para saber qué stock devolver).
     const order = await prisma.orders.findFirst({ where: { id, store_id: store.id }, select: { id: true, order_status: true, items: true } });
     if (!order) {
       res.status(404).json({ success: false, message: "Order not found" });
       return;
     }
+
+    // Un pedido cancelado no admite más cambios. Esta comprobación es la
+    // que impide devolver el stock dos veces.
     if (order.order_status === "cancelled") {
       res.status(400).json({ success: false, message: "Cancelled orders can't be changed" });
       return;
     }
 
+    // TRANSACCIÓN: reponer stock y cambiar el estado se confirman juntos o
+    // se deshacen juntos. Así no puede quedar un pedido cancelado sin
+    // stock devuelto, ni stock devuelto con el pedido sin cancelar.
     const updated = await prisma.$transaction(async (tx) => {
       if (status === "cancelled") {
+        // `items` es JSON en la BD: se comprueba que sea array. El
+        // `as any[]` es necesario porque Prisma lo tipa como JsonValue.
         const items = Array.isArray(order.items) ? (order.items as any[]) : [];
         for (const item of items) {
+          // Cada línea es la "foto" guardada en `createOrder`
+          // (`product_id`, `quantity`...). Se revalida por prudencia.
           const productId = parseId(item?.product_id);
           const quantity = Number(item?.quantity);
           if (productId && Number.isInteger(quantity) && quantity > 0) {
-            // updateMany: the product may have been deleted since
+            // `updateMany` (y no `update`) a propósito: si el producto
+            // se borró después de la compra, `update` lanzaría un error
+            // y bloquearía la cancelación; `updateMany` simplemente no
+            // afecta a ninguna fila. `increment` suma en la BD de forma
+            // atómica, sin leer el stock antes.
             await tx.products.updateMany({ where: { id: productId }, data: { stock: { increment: quantity } } });
           }
         }
       }
+      // Cambia el estado. Si algo falló arriba, esto no llega a ejecutarse.
       return tx.orders.update({ where: { id }, data: { order_status: status } });
     });
 
     res.status(200).json({ success: true, message: `Order is now ${status}`, order: updated });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("updateOrderStatus error:", error);
     res.status(500).json({ success: false, message: "Failed to update order status" });
   }
