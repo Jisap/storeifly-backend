@@ -187,3 +187,17 @@ const parseShippingAddress = (value: unknown): string | Record<string, string> |
     // Cualquier otro tipo (número, boolean, null, undefined, array...).
     return null;
 }
+
+// Combines duplicate products and checks quantities: [{ productId, quantity }]
+const parseItems = (value: unknown): Map<number, number> | null => {
+    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_LINE_ITEMS) return null;
+    const items = new Map<number, number>();
+    for (const item of value) {
+        const productId = parseId(item?.productId ?? item?.product_id);
+        const quantity = Number(item?.quantity);
+        if (!productId || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) return null;
+        items.set(productId, (items.get(productId) ?? 0) + quantity);
+    }
+    for (const qty of items.values()) if (qty > MAX_QUANTITY) return null;
+    return items;
+}
