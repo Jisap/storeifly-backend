@@ -76,8 +76,8 @@ class CheckoutError extends Error { }
  * @returns El id como número, o `null` si no es un entero positivo.
  */
 const parseId = (value: unknown) => {
-    const n = Number(value);
-    return Number.isInteger(n) && n > 0 ? n : null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /**
@@ -96,7 +96,7 @@ const parseId = (value: unknown) => {
  * @returns `true` si parece un email válido.
  */
 const isEmail = (value: unknown): value is string =>
-    typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 /**
  * Genera un número de pedido aleatorio, por ejemplo "ORD-7K2QX9MBT4WZ".
@@ -123,13 +123,13 @@ const isEmail = (value: unknown): value is string =>
  * @returns Una cadena como "ORD-XXXXXXXXXXXX".
  */
 const generateOrderNumber = () => {
-    // 32 caracteres: A-Z sin I ni O (24 letras) + dígitos 2-9 (8 dígitos).
-    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    // 12 bytes aleatorios seguros, uno por cada carácter del código.
-    const bytes = randomBytes(12);
-    // `Array.from(bytes, fn)` recorre los bytes y convierte cada uno en una
-    // letra del alfabeto; `join("")` las une en un solo string.
-    return "ORD-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+  // 32 caracteres: A-Z sin I ni O (24 letras) + dígitos 2-9 (8 dígitos).
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  // 12 bytes aleatorios seguros, uno por cada carácter del código.
+  const bytes = randomBytes(12);
+  // `Array.from(bytes, fn)` recorre los bytes y convierte cada uno en una
+  // letra del alfabeto; `join("")` las une en un solo string.
+  return "ORD-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
 
 /**
@@ -158,34 +158,34 @@ const generateOrderNumber = () => {
  *          llame debe comprobar el `null` y responder 400.
  */
 const parseShippingAddress = (value: unknown): string | Record<string, string> | null => {
-    // CASO 1: texto. `value.trim() && ...` es falsy si queda vacío tras
-    // recortar. La longitud se comprueba sobre el valor SIN recortar, así
-    // que un texto de 500 caracteres + espacios finales se rechaza.
-    if (typeof value === "string") {
-        return value.trim() && value.length <= 500 ? value.trim() : null;
-    }
+  // CASO 1: texto. `value.trim() && ...` es falsy si queda vacío tras
+  // recortar. La longitud se comprueba sobre el valor SIN recortar, así
+  // que un texto de 500 caracteres + espacios finales se rechaza.
+  if (typeof value === "string") {
+    return value.trim() && value.length <= 500 ? value.trim() : null;
+  }
 
-    // CASO 2: objeto "plano". `value &&` descarta null (typeof null === "object")
-    // y `!Array.isArray` descarta arrays, que también son objetos en JS.
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-        // Convierte el objeto en pares [clave, valor] para validarlos.
-        const entries = Object.entries(value);
+  // CASO 2: objeto "plano". `value &&` descarta null (typeof null === "object")
+  // y `!Array.isArray` descarta arrays, que también son objetos en JS.
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    // Convierte el objeto en pares [clave, valor] para validarlos.
+    const entries = Object.entries(value);
 
-        // Sin campos, o demasiados: se rechaza.
-        if (entries.length === 0 || entries.length > 10) return null;
+    // Sin campos, o demasiados: se rechaza.
+    if (entries.length === 0 || entries.length > 10) return null;
 
-        // TODOS los valores deben ser strings cortos. Un solo valor inválido
-        // (número, objeto anidado, texto largo...) invalida la dirección entera.
-        if (!entries.every(([, v]) => typeof v === "string" && v.length <= 200)) return null;
+    // TODOS los valores deben ser strings cortos. Un solo valor inválido
+    // (número, objeto anidado, texto largo...) invalida la dirección entera.
+    if (!entries.every(([, v]) => typeof v === "string" && v.length <= 200)) return null;
 
-        // Reconstruye el objeto limpio: claves truncadas a 50 caracteres y
-        // valores recortados. `(v as string)` es seguro porque el `every`
-        // anterior ya comprobó que son strings; TypeScript no lo infiere.
-        return Object.fromEntries(entries.map(([k, v]) => [k.slice(0, 50), (v as string).trim()]));
-    }
+    // Reconstruye el objeto limpio: claves truncadas a 50 caracteres y
+    // valores recortados. `(v as string)` es seguro porque el `every`
+    // anterior ya comprobó que son strings; TypeScript no lo infiere.
+    return Object.fromEntries(entries.map(([k, v]) => [k.slice(0, 50), (v as string).trim()]));
+  }
 
-    // Cualquier otro tipo (número, boolean, null, undefined, array...).
-    return null;
+  // Cualquier otro tipo (número, boolean, null, undefined, array...).
+  return null;
 }
 
 /**
@@ -223,32 +223,136 @@ const parseShippingAddress = (value: unknown): string | Record<string, string> |
  *          responder 400.
  */
 const parseItems = (value: unknown): Map<number, number> | null => {
-    // Debe ser un array no vacío y con un máximo de líneas.
-    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_LINE_ITEMS) return null;
+  // Debe ser un array no vacío y con un máximo de líneas.
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_LINE_ITEMS) return null;
 
-    // Aquí se acumulan los productos ya fusionados.
-    const items = new Map<number, number>();
+  // Aquí se acumulan los productos ya fusionados.
+  const items = new Map<number, number>();
 
-    for (const item of value) {
-        // Acepta `productId` o `product_id`. `item?.` evita un error si el
-        // elemento es null/undefined (en ese caso `parseId` devuelve null).
-        const productId = parseId(item?.productId ?? item?.product_id);
+  for (const item of value) {
+    // Acepta `productId` o `product_id`. `item?.` evita un error si el
+    // elemento es null/undefined (en ese caso `parseId` devuelve null).
+    const productId = parseId(item?.productId ?? item?.product_id);
 
-        // `Number()` acepta 2 y "2". Ojo: `Number(undefined)` es NaN y
-        // `Number(null)` es 0; ambos se rechazan en la comprobación siguiente.
-        const quantity = Number(item?.quantity);
+    // `Number()` acepta 2 y "2". Ojo: `Number(undefined)` es NaN y
+    // `Number(null)` es 0; ambos se rechazan en la comprobación siguiente.
+    const quantity = Number(item?.quantity);
 
-        // Id inválido, cantidad no entera, menor que 1 o mayor que el máximo:
-        // se rechaza el pedido entero.
-        if (!productId || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) return null;
+    // Id inválido, cantidad no entera, menor que 1 o mayor que el máximo:
+    // se rechaza el pedido entero.
+    if (!productId || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) return null;
 
-        // Si el producto ya estaba, se suma; si no, `?? 0` parte de cero.
-        items.set(productId, (items.get(productId) ?? 0) + quantity);
+    // Si el producto ya estaba, se suma; si no, `?? 0` parte de cero.
+    items.set(productId, (items.get(productId) ?? 0) + quantity);
+  }
+
+  // Segunda comprobación: tras fusionar duplicados, la suma puede superar
+  // el máximo aunque cada línea individual fuera válida (ej. 60 + 60).
+  for (const qty of items.values()) if (qty > MAX_QUANTITY) return null;
+
+  return items;
+}
+
+// Checkout: anyone can place an order. Logged-in customers get it linked to their account.
+// Prices always come from the database, never from the request.
+export const createOrder = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const body = req.body ?? {};
+    const storeId = parseId(body.storeId ?? body.store_id);
+    const customerName = typeof body.customerName === "string" ? body.customerName.trim() : "";
+    const customerEmail = typeof body.customerEmail === "string" ? body.customerEmail.trim().toLowerCase() : "";
+    const customerPhone = typeof body.customerPhone === "string" ? body.customerPhone.trim() : undefined;
+    const shippingAddress = parseShippingAddress(body.shippingAddress);
+    const items = parseItems(body.items);
+
+    if (!storeId) { res.status(400).json({ success: false, message: "A valid storeId is required" }); return; }
+    if (!customerName || customerName.length > 255) { res.status(400).json({ success: false, message: "Customer name is required" }); return; }
+    if (!isEmail(customerEmail)) { res.status(400).json({ success: false, message: "A valid customer email is required" }); return; }
+    if (customerPhone !== undefined && customerPhone.length > 50) { res.status(400).json({ success: false, message: "Phone number is too long" }); return; }
+    if (!shippingAddress) { res.status(400).json({ success: false, message: "A shipping address is required" }); return; }
+    if (!items) { res.status(400).json({ success: false, message: `items must be a list of 1-${MAX_LINE_ITEMS} { productId, quantity } with quantity 1-${MAX_QUANTITY}` }); return; }
+
+    const store = await prisma.stores.findUnique({
+      where: { id: storeId },
+      select: { id: true, status: true, shipping_fee: true, free_shipping_threshold: true, payment_methods: true },
+    });
+    if (!store || store.status !== "active") {
+      res.status(404).json({ success: false, message: "Store not found" });
+      return;
     }
 
-    // Segunda comprobación: tras fusionar duplicados, la suma puede superar
-    // el máximo aunque cada línea individual fuera válida (ej. 60 + 60).
-    for (const qty of items.values()) if (qty > MAX_QUANTITY) return null;
+    const paymentMethod = body.paymentMethod ?? body.payment_method ?? store.payment_methods[0];
+    if (!store.payment_methods.includes(paymentMethod)) {
+      res.status(400).json({ success: false, message: `This store accepts: ${store.payment_methods.join(", ")}` });
+      return;
+    }
 
-    return items;
+    const order = await prisma.$transaction(async (tx) => {
+      const products = await tx.products.findMany({
+        where: { id: { in: [...items.keys()] }, store_id: store.id, status: "active" },
+        select: { id: true, name: true, price: true, images: true },
+      });
+      if (products.length !== items.size) throw new CheckoutError("One or more products are unavailable");
+
+      let subtotal = new Decimal(0);
+      const lineItems = products.map((p) => {
+        const quantity = items.get(p.id)!;
+        const lineTotal = p.price.mul(quantity);
+        subtotal = subtotal.add(lineTotal);
+        const images = Array.isArray(p.images) ? p.images : [];
+        return {
+          product_id: p.id,
+          name: p.name,
+          price: p.price.toFixed(2),
+          quantity,
+          line_total: lineTotal.toFixed(2),
+          image: typeof images[0] === "string" ? images[0] : null,
+        };
+      });
+
+      // Reserve stock: only succeeds if enough is left, so two buyers can't both take the last one
+      for (const [productId, quantity] of items) {
+        const updated = await tx.products.updateMany({
+          where: { id: productId, stock: { gte: quantity } },
+          data: { stock: { decrement: quantity } },
+        });
+        if (updated.count === 0) {
+          const name = products.find((p) => p.id === productId)?.name ?? "A product";
+          throw new CheckoutError(`${name} is out of stock or doesn't have enough left`);
+        }
+      }
+
+      const shippingFee = store.shipping_fee ?? new Decimal(0);
+      const freeFrom = store.free_shipping_threshold ?? new Decimal(0);
+      const shippingCost = freeFrom.gt(0) && subtotal.gte(freeFrom) ? new Decimal(0) : shippingFee;
+
+      return tx.orders.create({
+        data: {
+          order_number: generateOrderNumber(),
+          store_id: store.id,
+          customer_id: req.user?.id ?? null,
+          customer_name: customerName,
+          customer_email: customerEmail,
+          customer_phone: customerPhone || null,
+          shipping_address: shippingAddress,
+          items: lineItems,
+          subtotal,
+          shipping_cost: shippingCost,
+          discount: 0,
+          total: subtotal.add(shippingCost),
+          payment_method: paymentMethod,
+        },
+      });
+    });
+
+    res.status(201).json({ success: true, message: "Order placed successfully", order });
+  } catch (error) {
+    if (error instanceof CheckoutError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    console.error("createOrder error:", error);
+    res.status(500).json({ success: false, message: "Failed to place order" });
+  }
 }
+
