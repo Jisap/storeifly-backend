@@ -253,53 +253,132 @@ const parseItems = (value: unknown): Map<number, number> | null => {
   return items;
 }
 
-// Checkout: anyone can place an order. Logged-in customers get it linked to their account.
-// Prices always come from the database, never from the request.
+/**
+ * Controlador: crea un pedido (checkout).
+ *
+ * Reglas de negocio:
+ *  - CUALQUIERA puede comprar, con o sin cuenta (compra como invitado).
+ *    Si el usuario está logueado, el pedido se vincula a su cuenta
+ *    (`customer_id`); si no, queda en `null`.
+ *  - Los PRECIOS salen siempre de la base de datos, nunca de la petición. El
+ *    cliente solo envía ids de producto y cantidades.
+ *  - El stock se reserva (descuenta) dentro de la misma transacción que crea
+ *    el pedido: o se hace todo, o no se hace nada.
+ *
+ * IMPORTANTE: usa `AuthenticatedRequest`, pero `req.user` es OPCIONAL aquí
+ * (`req.user?.id`). La ruta NO debe usar `requireAuth` (rechazaría a los
+ * invitados), sino un middleware de "autenticación opcional" que rellene
+ * `req.user` si hay sesión y deje pasar si no la hay.
+ *
+ * Ruta esperada: POST con body JSON:
+ *   {
+ *     "storeId": 3,                         // o "store_id"
+ *     "customerName": "Ana Pérez",
+ *     "customerEmail": "ana@correo.com",
+ *     "customerPhone": "+233...",           // opcional, máx. 50 caracteres
+ *     "shippingAddress": "texto" | { ... }, // ver parseShippingAddress
+ *     "items": [{ "productId": 5, "quantity": 2 }],
+ *     "paymentMethod": "cash_on_delivery"   // opcional; o "payment_method"
+ *   }
+ *
+ * Flujo:
+ *  1. Lee y valida el body (todo en memoria, sin tocar la BD).
+ *  2. Comprueba que la tienda existe, está activa y admite el método de pago.
+ *  3. Transacción: carga los productos, calcula importes, reserva stock y
+ *     crea el pedido.
+ *
+ * Respuestas:
+ *  - 201: `{ success, message, order }`
+ *  - 400: datos inválidos, método de pago no admitido, producto no disponible
+ *         o sin stock suficiente (`CheckoutError`).
+ *  - 404: la tienda no existe o no está activa.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición de Express; `req.user` solo existe si hay sesión.
+ * @param res - Respuesta de Express.
+ */
 export const createOrder = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // `?? {}` evita un error si el body llega `undefined`.
     const body = req.body ?? {};
+
+    // Se aceptan camelCase y snake_case para el id de la tienda.
     const storeId = parseId(body.storeId ?? body.store_id);
+
+    // Nombre: si no es string queda "" y falla la validación de abajo.
     const customerName = typeof body.customerName === "string" ? body.customerName.trim() : "";
+
+    // Email: se normaliza (recorta y pasa a minúsculas) ANTES de validar,
+    // para guardar siempre el mismo formato y poder buscar pedidos por email.
     const customerEmail = typeof body.customerEmail === "string" ? body.customerEmail.trim().toLowerCase() : "";
+
+    // Teléfono: opcional. `undefined` = no enviado (o no era texto).
     const customerPhone = typeof body.customerPhone === "string" ? body.customerPhone.trim() : undefined;
+
+    // Ambos devuelven `null` si son inválidos (ver sus comentarios).
     const shippingAddress = parseShippingAddress(body.shippingAddress);
     const items = parseItems(body.items);
 
+    // VALIDACIONES: todas ocurren antes de consultar la BD, así una
+    // petición mal formada no cuesta ninguna consulta.
     if (!storeId) { res.status(400).json({ success: false, message: "A valid storeId is required" }); return; }
     if (!customerName || customerName.length > 255) { res.status(400).json({ success: false, message: "Customer name is required" }); return; }
+    // `isEmail` es un type guard: a partir de aquí `customerEmail` es `string`.
     if (!isEmail(customerEmail)) { res.status(400).json({ success: false, message: "A valid customer email is required" }); return; }
     if (customerPhone !== undefined && customerPhone.length > 50) { res.status(400).json({ success: false, message: "Phone number is too long" }); return; }
     if (!shippingAddress) { res.status(400).json({ success: false, message: "A shipping address is required" }); return; }
     if (!items) { res.status(400).json({ success: false, message: `items must be a list of 1-${MAX_LINE_ITEMS} { productId, quantity } with quantity 1-${MAX_QUANTITY}` }); return; }
 
+    // Carga la tienda con solo los campos necesarios para el checkout:
+    // estado, costes de envío y métodos de pago aceptados.
     const store = await prisma.stores.findUnique({
       where: { id: storeId },
       select: { id: true, status: true, shipping_fee: true, free_shipping_threshold: true, payment_methods: true },
     });
+    // Una tienda suspendida se trata igual que una inexistente (404), sin
+    // revelar que existe. Es lo que impide comprar en tiendas suspendidas.
     if (!store || store.status !== "active") {
       res.status(404).json({ success: false, message: "Store not found" });
       return;
     }
 
+    // Método de pago: el enviado, o si no se envió, el primero que acepte
+    // la tienda. Debe estar entre los aceptados por ESA tienda.
     const paymentMethod = body.paymentMethod ?? body.payment_method ?? store.payment_methods[0];
     if (!store.payment_methods.includes(paymentMethod)) {
       res.status(400).json({ success: false, message: `This store accepts: ${store.payment_methods.join(", ")}` });
       return;
     }
 
+    // TRANSACCIÓN: todo lo de dentro se confirma junto o se deshace junto.
+    // Cualquier error lanzado dentro (incluido `CheckoutError`) provoca el
+    // ROLLBACK, y el stock descontado vuelve a su valor.
     const order = await prisma.$transaction(async (tx) => {
+      // Productos pedidos. Filtros de seguridad en el `where`:
+      //  - `store_id: store.id`: no se pueden mezclar productos de otra tienda.
+      //  - `status: "active"`: borradores y archivados no se pueden comprar.
       const products = await tx.products.findMany({
         where: { id: { in: [...items.keys()] }, store_id: store.id, status: "active" },
         select: { id: true, name: true, price: true, images: true },
       });
+      // Si falta alguno (no existe, otra tienda, no activo) se cancela todo.
+      // Sirve porque `items` (Map) no tiene ids repetidos.
       if (products.length !== items.size) throw new CheckoutError("One or more products are unavailable");
 
+      // Importes con `Decimal` (sin errores de redondeo de `number`).
       let subtotal = new Decimal(0);
       const lineItems = products.map((p) => {
+        // `!` es seguro: `products` solo contiene ids que están en `items`.
         const quantity = items.get(p.id)!;
+        // Precio REAL de la BD × cantidad.
         const lineTotal = p.price.mul(quantity);
         subtotal = subtotal.add(lineTotal);
+        // `images` es JSON en la BD: se comprueba que sea array.
         const images = Array.isArray(p.images) ? p.images : [];
+        // "Foto" del producto en el momento de la compra. Se guarda
+        // nombre, precio e imagen DENTRO del pedido para que el
+        // historial no cambie si luego se edita o borra el producto.
+        // Los importes se guardan como string con 2 decimales.
         return {
           product_id: p.id,
           name: p.name,
@@ -310,26 +389,38 @@ export const createOrder = async (req: AuthenticatedRequest, res: Response): Pro
         };
       });
 
-      // Reserve stock: only succeeds if enough is left, so two buyers can't both take the last one
+      // RESERVA DE STOCK. El `updateMany` con `stock: { gte: quantity }`
+      // comprueba y descuenta en UNA sola operación atómica de la BD. Si
+      // dos compradores piden la última unidad a la vez, a uno le
+      // devuelve `count === 0`. Leer el stock y luego restarlo en dos
+      // pasos permitiría vender más de lo que hay.
       for (const [productId, quantity] of items) {
         const updated = await tx.products.updateMany({
           where: { id: productId, stock: { gte: quantity } },
           data: { stock: { decrement: quantity } },
         });
         if (updated.count === 0) {
+          // El nombre sale de `products` (leído arriba) para un mensaje claro.
           const name = products.find((p) => p.id === productId)?.name ?? "A product";
           throw new CheckoutError(`${name} is out of stock or doesn't have enough left`);
         }
       }
 
+      // ENVÍO. `?? new Decimal(0)` cubre campos nulos en la tienda.
+      // `free_shipping_threshold` en 0 (o nulo) significa "sin envío
+      // gratis". Si está definido y el subtotal lo alcanza, el envío es 0.
       const shippingFee = store.shipping_fee ?? new Decimal(0);
       const freeFrom = store.free_shipping_threshold ?? new Decimal(0);
       const shippingCost = freeFrom.gt(0) && subtotal.gte(freeFrom) ? new Decimal(0) : shippingFee;
 
+      // Crea el pedido. Se devuelve el resultado de `create`, que pasa a
+      // ser el valor de toda la transacción (`order`).
       return tx.orders.create({
         data: {
+          // Número aleatorio no adivinable (ver `generateOrderNumber`).
           order_number: generateOrderNumber(),
           store_id: store.id,
+          // Cuenta del comprador, o null si es invitado.
           customer_id: req.user?.id ?? null,
           customer_name: customerName,
           customer_email: customerEmail,
@@ -338,19 +429,24 @@ export const createOrder = async (req: AuthenticatedRequest, res: Response): Pro
           items: lineItems,
           subtotal,
           shipping_cost: shippingCost,
+          // Aún no hay descuentos/cupones.
           discount: 0,
           total: subtotal.add(shippingCost),
           payment_method: paymentMethod,
+          // `status` no se envía: lo fija el valor por defecto del esquema.
         },
       });
     });
 
+    // Los `Decimal` se serializan como string en el JSON ("25.00").
     res.status(201).json({ success: true, message: "Order placed successfully", order });
   } catch (error) {
+    // Errores "esperados" del checkout: se envía su mensaje al cliente.
     if (error instanceof CheckoutError) {
       res.status(400).json({ success: false, message: error.message });
       return;
     }
+    // Cualquier otro: detalle en el log, mensaje genérico al cliente.
     console.error("createOrder error:", error);
     res.status(500).json({ success: false, message: "Failed to place order" });
   }
