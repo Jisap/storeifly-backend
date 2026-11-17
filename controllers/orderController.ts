@@ -452,3 +452,29 @@ export const createOrder = async (req: AuthenticatedRequest, res: Response): Pro
   }
 }
 
+// Merchant: orders for their store, optionally filtered with ?status=
+export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    const { status } = req.query;
+    if (status !== undefined && (typeof status !== "string" || !ORDER_STATUSES.includes(status))) {
+      res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
+      return;
+    }
+
+    const orders = await prisma.orders.findMany({
+      where: { store_id: store.id, ...(status ? { order_status: status as string } : {}) },
+      orderBy: { created_at: "desc" },
+    });
+    res.status(200).json({ success: true, orders });
+  } catch (error) {
+    console.error("getMerchantOrders error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch orders" });
+  }
+}
+
