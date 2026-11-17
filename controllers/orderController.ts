@@ -452,15 +452,40 @@ export const createOrder = async (req: AuthenticatedRequest, res: Response): Pro
   }
 }
 
-// Merchant: orders for their store, optionally filtered with ?status=
+/**
+ * Controlador: lista los pedidos de la tienda del comerciante autenticado,
+ * del más reciente al más antiguo, con filtro opcional por estado.
+ *
+ * Seguridad (propiedad del recurso): la tienda se obtiene de `req.user.id`,
+ * no de un id enviado por el cliente, y los pedidos se filtran SIEMPRE por
+ * `store_id`. Un comerciante nunca ve pedidos de otras tiendas.
+ *
+ * Ruta esperada: GET con query opcional: `?status=shipped`.
+ * Requiere autenticación (y, según la ruta, rol "merchant").
+ *
+ * Respuestas:
+ *  - 200: `{ success, orders }` (array, vacío si no hay pedidos).
+ *  - 400: `status` no válido (o enviado más de una vez, ver notas).
+ *  - 404: el usuario todavía no tiene tienda.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express (`req.query.status` opcional).
+ * @param res - Respuesta de Express.
+ */
 export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Tienda del usuario autenticado (`!` asume que `requireAuth` ya corrió).
+    // Solo se selecciona `id`, que es lo único necesario.
     const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
     if (!store) {
       res.status(404).json({ success: false, message: "You have not created a store yet" });
       return;
     }
 
+    // Filtro opcional por estado. `req.query.status` puede ser string,
+    // array (`?status=a&status=b`) u objeto (`?status[x]=1`), por eso se
+    // comprueba `typeof status !== "string"` ANTES de buscarlo en la
+    // lista blanca. Si no se envía (`undefined`), no se filtra.
     const { status } = req.query;
     if (status !== undefined && (typeof status !== "string" || !ORDER_STATUSES.includes(status))) {
       res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
@@ -468,13 +493,21 @@ export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response
     }
 
     const orders = await prisma.orders.findMany({
-      where: { store_id: store.id, ...(status ? { order_status: status as string } : {}) },
+      where: {
+        // Filtro de propiedad: imprescindible, no lo quites.
+        store_id: store.id,
+        // Spread condicional: añade `order_status` solo si hay filtro.
+        // `status as string` es seguro tras la validación (TypeScript
+        // no estrecha el tipo de `req.query` por sí solo).
+        ...(status ? { order_status: status as string } : {}),
+      },
+      // Más recientes primero.
       orderBy: { created_at: "desc" },
     });
     res.status(200).json({ success: true, orders });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getMerchantOrders error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch orders" });
   }
 }
-
