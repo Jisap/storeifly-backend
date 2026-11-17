@@ -71,6 +71,8 @@ model stores {
   logo_url                String?
   banner_url              String?
   description             String?
+  address                 String?
+  payment_methods         String[]     @default(["mobile_money", "cash_on_delivery", "bank_transfer"])
   currency                String?      @default("USD") @db.VarChar(10)
   status                  String?      @default("active") @db.VarChar(50)
   shipping_fee            Decimal?     @default(0) @db.Decimal(10, 2)
