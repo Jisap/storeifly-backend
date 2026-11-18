@@ -688,3 +688,44 @@ export const getOrderReceipt = async (req: Request, res: Response): Promise<void
     res.status(500).json({ success: false, message: "Failed to fetch receipt" });
   }
 }
+
+// Logged-in customer: their own orders, plus guest orders placed with their email
+// (only if that email is verified). Optional ?storeSlug= or ?storeId= to show one store.
+export const getCustomerOrders = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: userId, email: userEmail } = req.user!;
+    const { storeSlug, storeId } = req.query;
+
+    let storeFilter: { store_id: number } | {} = {};
+    if (storeSlug !== undefined || storeId !== undefined) {
+      const id = parseId(storeId);
+      const store = typeof storeSlug === "string" && storeSlug
+        ? await prisma.stores.findUnique({ where: { slug: storeSlug }, select: { id: true } })
+        : id ? await prisma.stores.findUnique({ where: { id }, select: { id: true } }) : null;
+      if (!store) {
+        res.status(404).json({ success: false, message: "Store not found" });
+        return;
+      }
+      storeFilter = { store_id: store.id };
+    }
+
+    // Anyone can sign up with any email, so only trust it once it's verified
+    const matchEmail = userEmail && await isNeonEmailVerified(userId);
+
+    const orders = await prisma.orders.findMany({
+      where: {
+        ...storeFilter,
+        OR: [
+          { customer_id: userId },
+          ...(matchEmail ? [{ customer_email: { equals: userEmail, mode: "insensitive" as const } }] : []),
+        ],
+      },
+      orderBy: { created_at: "desc" },
+      include: { stores: { select: { id: true, name: true, slug: true } } },
+    });
+    res.status(200).json({ success: true, orders });
+  } catch (error) {
+    console.error("getCustomerOrders error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch your orders" });
+  }
+}
