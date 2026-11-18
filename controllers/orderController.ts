@@ -621,15 +621,49 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
   }
 }
 
-// Public receipt by order number (order numbers are random, so they work like a private link)
+/**
+ * Controlador: devuelve el recibo de un pedido a partir de su número
+ * (por ejemplo, "ORD-7K2QX9MBT4WZ"). Es PÚBLICO: no requiere sesión.
+ *
+ * Modelo de seguridad: el número de pedido funciona como un "enlace privado"
+ * (capability URL). Como `generateOrderNumber` lo genera aleatorio con 32^12
+ * combinaciones, nadie puede adivinar el de otra persona; solo accede quien
+ * lo recibió (el comprador, por pantalla o por email). Por eso este endpoint
+ * puede ser público, y por eso es CRUCIAL que los números NO sean
+ * secuenciales ni predecibles.
+ *
+ * Usa `Request` normal (no `AuthenticatedRequest`): la ruta no debe llevar
+ * `requireAuth`, porque los compradores invitados no tienen cuenta.
+ *
+ * Qué devuelve: el pedido completo (cliente, dirección, líneas, importes,
+ * estado...) más los datos públicos de la tienda (`store`). Se OMITE
+ * `customer_id` para no exponer el id interno de la cuenta del comprador.
+ *
+ * Ruta esperada: GET `/:orderNumber`, sin body.
+ *
+ * Respuestas:
+ *  - 200: `{ success, order }` con `order.store` = `{ id, name, slug, logo_url, currency, accent_color }`.
+ *  - 404: número inválido o pedido inexistente (mismo mensaje en ambos casos).
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición de Express (`req.params.orderNumber`).
+ * @param res - Respuesta de Express.
+ */
 export const getOrderReceipt = async (req: Request, res: Response): Promise<void> => {
   try {
+    // Número de pedido desde la URL. Se rechaza lo que no sea string o sea
+    // demasiado largo (evita consultas con valores absurdos). Se responde
+    // 404 (no 400) para no dar pistas sobre el formato esperado.
     const orderNumber = req.params.orderNumber;
     if (typeof orderNumber !== "string" || orderNumber.length > 100) {
       res.status(404).json({ success: false, message: "Order not found" });
       return;
     }
 
+    // `findUnique` requiere que `order_number` sea `@unique` en el esquema
+    // (si no lo fuera, TypeScript daría error). `include` trae la tienda,
+    // pero con `select` SOLO los campos públicos necesarios para pintar el
+    // recibo con la imagen de la tienda (logo, color, moneda).
     const order = await prisma.orders.findUnique({
       where: { order_number: orderNumber },
       include: { stores: { select: { id: true, name: true, slug: true, logo_url: true, currency: true, accent_color: true } } },
@@ -639,9 +673,17 @@ export const getOrderReceipt = async (req: Request, res: Response): Promise<void
       return;
     }
 
+    // Desestructuración para REORGANIZAR la respuesta:
+    //  - `stores` se separa para renombrarlo a `store` (singular).
+    //  - `customer_id: _customerId` se extrae y se descarta (el guion bajo
+    //    indica "variable no usada"), así NO viaja en `...rest`.
+    //  - `rest` conserva todo lo demás.
+    // Es una lista de exclusión: si añades al modelo `orders` un campo
+    // interno nuevo, saldrá en la respuesta salvo que lo excluyas aquí.
     const { stores, customer_id: _customerId, ...rest } = order;
     res.status(200).json({ success: true, order: { ...rest, store: stores } });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getOrderReceipt error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch receipt" });
   }
