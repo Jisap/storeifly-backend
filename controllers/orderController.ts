@@ -689,16 +689,56 @@ export const getOrderReceipt = async (req: Request, res: Response): Promise<void
   }
 }
 
-// Logged-in customer: their own orders, plus guest orders placed with their email
-// (only if that email is verified). Optional ?storeSlug= or ?storeId= to show one store.
+/**
+ * Controlador: lista los pedidos del cliente autenticado, del más reciente
+ * al más antiguo. Aquí es donde se usa `isNeonEmailVerified` (la duda que
+ * dejé en la nota de `createOrder`).
+ *
+ * Un pedido se considera "del cliente" si cumple UNA de estas condiciones:
+ *  1. Está vinculado a su cuenta (`customer_id` = su id). Son los pedidos
+ *     hechos con sesión iniciada.
+ *  2. Se hizo como INVITADO con el mismo email de su cuenta, pero SOLO si
+ *     ese email está verificado. Así, si compró como invitado y luego se
+ *     registra, sigue viendo sus compras antiguas.
+ *
+ * Seguridad (la razón de la verificación): cualquiera puede registrarse con
+ * el email de otra persona. Sin verificar, un atacante crearía una cuenta
+ * con `victima@correo.com` y vería los pedidos (nombre, teléfono, dirección)
+ * de la víctima. Con la verificación, solo quien controla el buzón accede.
+ *
+ * Ruta esperada: GET con query opcional: `?storeSlug=mi-tienda` o
+ * `?storeId=3` para ver solo los pedidos de una tienda.
+ * Requiere autenticación (`requireAuth`).
+ *
+ * Respuestas:
+ *  - 200: `{ success, orders }` (cada pedido incluye `stores: { id, name, slug }`).
+ *  - 404: se pidió una tienda concreta y no existe.
+ *  - 500: error inesperado.
+ *
+ * @param req - Petición autenticada de Express (`req.user` y `req.query`).
+ * @param res - Respuesta de Express.
+ */
 export const getCustomerOrders = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    // Id y email del usuario autenticado (de la sesión). `!` asume que
+    // `requireAuth` ya corrió.
     const { id: userId, email: userEmail } = req.user!;
     const { storeSlug, storeId } = req.query;
 
+    // Filtro opcional por tienda. Empieza vacío (= todas las tiendas) y,
+    // si se pide una, pasa a `{ store_id: n }`. Se esparce luego en el `where`.
     let storeFilter: { store_id: number } | {} = {};
+
+    // Si se envía cualquiera de los dos parámetros, el usuario QUIERE
+    // filtrar: si la tienda no se encuentra, es 404 y NO se devuelven
+    // pedidos de todas las tiendas.
     if (storeSlug !== undefined || storeId !== undefined) {
+      // `parseId` devuelve null si no es un entero positivo (también si
+      // `storeId` es array u objeto, porque `Number([..])` da NaN).
       const id = parseId(storeId);
+
+      // Prioridad: el slug (si es un string no vacío); si no, el id.
+      // Si ninguno es válido, `store` es null.
       const store = typeof storeSlug === "string" && storeSlug
         ? await prisma.stores.findUnique({ where: { slug: storeSlug }, select: { id: true } })
         : id ? await prisma.stores.findUnique({ where: { id }, select: { id: true } }) : null;
@@ -709,22 +749,34 @@ export const getCustomerOrders = async (req: AuthenticatedRequest, res: Response
       storeFilter = { store_id: store.id };
     }
 
-    // Anyone can sign up with any email, so only trust it once it's verified
+    // ¿Se puede confiar en el email? Solo si la cuenta tiene email Y está
+    // verificado. Se consulta la BD en vivo (no la sesión), así que tras
+    // verificar el email los pedidos de invitado aparecen al instante.
+    // Resultado: `matchEmail` es falsy ("" / null / undefined / false) o `true`.
     const matchEmail = userEmail && await isNeonEmailVerified(userId);
 
     const orders = await prisma.orders.findMany({
       where: {
+        // Filtro de tienda (vacío si no se pidió).
         ...storeFilter,
+        // OR: basta con que se cumpla una condición.
         OR: [
+          // Siempre: pedidos vinculados a su cuenta.
           { customer_id: userId },
+          // Solo con email verificado: pedidos de invitado con su email.
+          // `mode: "insensitive"` ignora mayúsculas/minúsculas.
+          // `as const` fija el literal "insensitive" para que TypeScript
+          // lo acepte como tipo de `mode` (si no, lo ensancha a `string`).
           ...(matchEmail ? [{ customer_email: { equals: userEmail, mode: "insensitive" as const } }] : []),
         ],
       },
       orderBy: { created_at: "desc" },
+      // Datos mínimos de la tienda para mostrar en la lista.
       include: { stores: { select: { id: true, name: true, slug: true } } },
     });
     res.status(200).json({ success: true, orders });
   } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getCustomerOrders error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch your orders" });
   }
