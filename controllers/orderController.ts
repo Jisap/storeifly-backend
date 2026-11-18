@@ -620,3 +620,29 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
     res.status(500).json({ success: false, message: "Failed to update order status" });
   }
 }
+
+// Public receipt by order number (order numbers are random, so they work like a private link)
+export const getOrderReceipt = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const orderNumber = req.params.orderNumber;
+    if (typeof orderNumber !== "string" || orderNumber.length > 100) {
+      res.status(404).json({ success: false, message: "Order not found" });
+      return;
+    }
+
+    const order = await prisma.orders.findUnique({
+      where: { order_number: orderNumber },
+      include: { stores: { select: { id: true, name: true, slug: true, logo_url: true, currency: true, accent_color: true } } },
+    });
+    if (!order) {
+      res.status(404).json({ success: false, message: "Order not found" });
+      return;
+    }
+
+    const { stores, customer_id: _customerId, ...rest } = order;
+    res.status(200).json({ success: true, order: { ...rest, store: stores } });
+  } catch (error) {
+    console.error("getOrderReceipt error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch receipt" });
+  }
+}
