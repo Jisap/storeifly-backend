@@ -241,3 +241,18 @@ export const isNeonEmailVerified = async (userId: string): Promise<boolean> => {
   // `=== true` hace que `null` y `undefined` cuenten como no verificado.
   return rows[0]?.emailVerified === true;
 }
+
+export const countNeonMerchants = async (): Promise<number> => {
+  try {
+    const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*) as count
+        FROM neon_auth.user
+        WHERE role = 'merchant'
+        `;
+
+    return Number(rows[0]?.count || 0);
+  } catch (e) {
+    console.error(e);
+    return 0;
+  }
+};
