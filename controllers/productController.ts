@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { prisma } from "../config/prisma.js";
 import { AuthenticatedRequest } from "../middleware/auth.js";
+import { parseId, isHttpsUrl } from "../utils/validation.js";
 
 /**
  * Listas y límites usados para validar los datos de PRODUCTOS que llegan
@@ -40,56 +41,6 @@ const MAX_VARIANTS = 50;
  */
 const getMerchantStore = (merchantId: string) =>
   prisma.stores.findFirst({ where: { merchant_id: merchantId }, select: { id: true } });
-
-/**
- * Comprueba si un valor desconocido es un string con una URL https.
- *
- * Aquí el parámetro es `unknown`, como en el archivo de Cloudinary, pero a
- * diferencia de aquella NO es un type guard: devuelve un `boolean` normal
- * (sin `value is string`). Consecuencia: tras `if (isHttpsUrl(x))`,
- * TypeScript sigue considerando `x` como `unknown` y tendrás que hacer un
- * cast o comprobar `typeof x === "string"` para usarlo como texto.
- *
- * Solo valida el protocolo, no el dominio.
- *
- * @param value - Valor a comprobar (cualquier tipo).
- * @returns `true` si es un string con URL válida y protocolo https.
- */
-const isHttpsUrl = (value: unknown) => {
-  // Si no es un string (número, objeto, undefined...) no puede ser una URL.
-  if (typeof value !== "string") return false;
-  try {
-    // `new URL()` lanza una excepción si el texto no es una URL válida.
-    return new URL(value).protocol === "https:";
-  } catch {
-    // Texto con formato de URL incorrecto.
-    return false;
-  }
-}
-
-/**
- * Convierte un valor desconocido en un id numérico válido.
- *
- * Los ids de tienda, categoría y producto son enteros positivos. Acepta
- * tanto números como textos numéricos ("5" → 5), que es lo que llega desde
- * la URL (`req.params`) o el body.
- *
- * Ejemplos:
- *   parseId("5")   → 5
- *   parseId(7)     → 7
- *   parseId("abc") → null
- *   parseId(0)     → null   (no positivo)
- *   parseId("1.5") → null   (no entero)
- *   parseId(null)  → null   (Number(null) es 0)
- *
- * @param value - Valor a convertir (cualquier tipo).
- * @returns El id como número, o `null` si no es un entero positivo.
- *          Quien la llame debe comprobar el `null`.
- */
-const parseId = (value: unknown) => {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
 
 /**
  * Valida y limpia los campos de un producto que un comerciante puede

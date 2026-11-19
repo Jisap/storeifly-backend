@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import cloudinary from '../config/cloudinary.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
+import { isHttpsUrl } from '../utils/validation.js';
 
 /**
  * Optimiza una URL de entrega de Cloudinary añadiendo transformaciones
@@ -57,31 +58,6 @@ const isOwnCloudinaryUrl = (url: string): boolean => {
       && u.pathname.startsWith(`/${cloudName}/image/upload/`);
   } catch {
     // URL mal formada → no es válida.
-    return false;
-  }
-}
-
-/**
- * Type guard: comprueba que un valor desconocido es un string con una
- * URL que usa HTTPS.
- *
- * Al declarar `value is string`, TypeScript sabe que, dentro de un `if`
- * donde esta función devuelva `true`, la variable ya es de tipo `string`.
- * Es útil para validar datos que llegan de `req.body` (tipo `unknown`).
- *
- * Nota: solo valida el protocolo, NO el dominio. Para comprobar que la
- * imagen es nuestra hay que usar además `isOwnCloudinaryUrl`.
- *
- * @param value - Valor a comprobar (puede ser de cualquier tipo).
- * @returns `true` si es un string con URL válida y protocolo HTTPS.
- */
-const isHttpsUrl = (value: unknown): value is string => {
-  // Si no es un string (número, objeto, undefined...) no puede ser una URL.
-  if (typeof value !== "string") return false;
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    // El texto no tiene formato de URL.
     return false;
   }
 }

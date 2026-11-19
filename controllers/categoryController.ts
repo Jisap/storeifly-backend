@@ -1,10 +1,7 @@
 import { Request, Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
-
-// "Summer Sale!" -> "summer-sale"
-const generateSlug = (text: string) => text.toString().toLowerCase().trim()
-  .replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+import { generateSlug, parseId } from "../utils/validation.js";
 
 const getStore = (merchantId: string) => prisma.stores.findFirst({ where: { merchant_id: merchantId } });
 
@@ -31,8 +28,7 @@ export const getCategories = async (req: Request, res: Response): Promise<void> 
       }
       targetStoreId = store.id;
     } else if (store_id) {
-      const id = Number(store_id);
-      if (Number.isInteger(id) && id > 0) targetStoreId = id;
+      targetStoreId = parseId(store_id);
     }
 
     if (!targetStoreId) {
@@ -127,8 +123,8 @@ export const createCategory = async (req: AuthenticatedRequest, res: Response): 
 export const deleteCategory = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     // 1. Validación del parámetro ID en la URL
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = parseId(req.params.id);
+    if (!id) {
       res.status(400).json({ success: false, message: 'Invalid category id' });
       return;
     }

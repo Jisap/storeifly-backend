@@ -17,6 +17,7 @@ import { Prisma } from "../generated/prisma/client.js";
 const { Decimal } = Prisma;
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { isNeonEmailVerified } from "../services/neonUser.js";
+import { parseId, isEmail } from "../utils/validation.js";
 
 /**
  * Listas y límites para validar los datos de PEDIDOS que llegan del cliente.
@@ -59,44 +60,6 @@ const MAX_QUANTITY = 100;
  * que nunca incluyas en él datos internos.
  */
 class CheckoutError extends Error { }
-
-/**
- * Convierte un valor desconocido en un id numérico válido (entero > 0).
- *
- * Es la misma función que en el controlador de productos (copia idéntica).
- * Acepta números y textos numéricos ("5" → 5).
- *
- * Ejemplos:
- *   parseId("5")   → 5
- *   parseId("abc") → null
- *   parseId(0)     → null
- *   parseId(null)  → null   (Number(null) es 0)
- *
- * @param value - Valor a convertir.
- * @returns El id como número, o `null` si no es un entero positivo.
- */
-const parseId = (value: unknown) => {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-/**
- * Type guard: comprueba que un valor es un string con formato de email.
- *
- * Reglas:
- *  - Debe ser un string de como máximo 255 caracteres.
- *  - Debe cumplir `algo@algo.algo`: sin espacios, con una sola `@` y al
- *    menos un punto en el dominio.
- *
- * Es una validación de FORMATO básica, no de existencia: "a@b.c" pasa.
- * Con `value is string`, dentro de un `if` TypeScript ya trata el valor como
- * `string`.
- *
- * @param value - Valor a comprobar.
- * @returns `true` si parece un email válido.
- */
-const isEmail = (value: unknown): value is string =>
-  typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 /**
  * Genera un número de pedido aleatorio, por ejemplo "ORD-7K2QX9MBT4WZ".

@@ -1,5 +1,5 @@
 /**
- * Utilidades de validación compartidas por los controladores.
+ * Utilidades de validación y formateo compartidas por los controladores.
  *
  * Antes estaban copiadas en varios archivos con pequeñas diferencias.
  * Si cambias una aquí, cambia en todos los sitios que la usan.
@@ -61,3 +61,23 @@ export const parseId = (value: unknown): number | null => {
  */
 export const isEmail = (value: unknown): value is string =>
     typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+/**
+ * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,
+ * sin símbolos y con guiones en lugar de espacios).
+ *
+ * Ejemplo:
+ *   "  Mi Tienda   Genial! " → "mi-tienda-genial"
+ *
+ * @param text - Texto de origen (por ejemplo, el nombre de una tienda o categoría).
+ * @returns El slug generado (puede ser una cadena vacía si no contiene caracteres válidos).
+ */
+export const generateSlug = (text: string): string =>
+    text
+        .toString()
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
