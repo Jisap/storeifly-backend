@@ -2,7 +2,7 @@ import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import { prisma } from "../config/prisma.js";
 // ⚠️ Estos dos imports no se usan en este fragmento (ver notas).
-import { countNeonMerchants, findNeonUsersByIds } from "../services/neonUser.js";
+import { countNeonMerchants, findNeonUserByIds } from "../services/neonUser.js";
 
 /**
  * Busca la tienda de un comerciante y devuelve el registro COMPLETO.
@@ -127,5 +127,54 @@ export const getMerchantAnalytics = async (req: AuthenticatedRequest, res: Respo
     // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("getMerchantAnalytics error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch merchant analytics" })
+  }
+}
+
+export const getPlatformAnalytics = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const [totalStores, activeStores, suspendedStores, totalMerchants, totalOrders, paidAgg, storesWithStats] = await Promise.all([
+      prisma.stores.count(),
+      prisma.stores.count({ where: { status: "active" } }),
+      prisma.stores.count({ where: { status: "suspended" } }),
+      countNeonMerchants(),
+      prisma.orders.count(),
+      prisma.orders.aggregate({ where: { payment_status: "paid" }, _sum: { total: true } }),
+      prisma.stores.findMany({
+        include: {
+          orders: { where: { payment_status: "paid" }, select: { total: true } },
+          _count: { select: { orders: true } },
+        }
+      })
+    ])
+
+    const merchantIds = storesWithStats.map((s) => s.merchant_id).filter(Boolean) as
+      string[];
+    const userMap = await findNeonUserByIds(merchantIds);
+
+    const topStores = storesWithStats.map((s) => ({
+      id: s.id,
+      name: s.name,
+      slug: s.slug,
+      status: s.status,
+      merchant_name: (s.merchant_id && userMap[s.merchant_id]?.name) || "Unknown",
+      order_count: s._count.orders,
+      revenue: s.orders.reduce((sum, o) => sum + Number(o.total), 0),
+    })).sort((a, b) => b.revenue - a.revenue).slice(0, 5);
+
+    res.json({
+      success: true,
+      analytics: {
+        totalStores,
+        activeStores,
+        suspendedStores,
+        totalMerchants,
+        totalOrders,
+        totalRevenue: Number(paidAgg._sum.total) || 0,
+        topStores,
+      },
+    });
+  } catch (error: any) {
+    console.error("getPlatformAnalytics error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch platform analytics" })
   }
 }
