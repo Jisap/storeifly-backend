@@ -242,17 +242,52 @@ export const isNeonEmailVerified = async (userId: string): Promise<boolean> => {
   return rows[0]?.emailVerified === true;
 }
 
+/**
+ * Cuenta cuántos usuarios de Neon Auth tienen el rol "merchant".
+ *
+ * Pensada para el panel de administración (por ejemplo, "N comerciantes
+ * registrados"). Es la versión "solo número" de `findNeonMerchants`: si solo
+ * necesitas la cifra, esta es mucho más barata, porque la BD cuenta y no
+ * transfiere filas.
+ *
+ * Usa SQL crudo porque la tabla `neon_auth."user"` no está en tus modelos de
+ * Prisma (igual que `updateNeonUserRole`, `findNeonUserByIds`,
+ * `findNeonMerchants` e `isNeonEmailVerified`).
+ *
+ * DIFERENCIA IMPORTANTE con las otras funciones de este archivo: si la
+ * consulta falla, NO lanza el error, sino que lo registra y devuelve `0`.
+ * Quien la llame no puede distinguir "no hay comerciantes" de "falló la BD".
+ *
+ * @returns Número de usuarios con rol "merchant" (0 si no hay ninguno o si falla la consulta).
+ */
 export const countNeonMerchants = async (): Promise<number> => {
   try {
+    // `COUNT(*)` en Postgres devuelve `bigint`, y Prisma lo entrega como
+    // `BigInt` de JavaScript (no como `number`). Por eso el tipo es
+    // `{ count: bigint }`. TypeScript no verifica ese tipo contra la BD.
+    //
+    // SQL:
+    //  - `COUNT(*) as count`: la columna del resultado se llama `count`.
+    //  - `neon_auth.user` va SIN comillas aquí. Funciona porque, tras el punto,
+    //    Postgres admite palabras reservadas, pero las otras funciones usan
+    //    `neon_auth."user"`. Conviene unificar (ver notas).
+    //  - `role = 'merchant'` es un valor fijo escrito en la consulta (no viene
+    //    del usuario), así que no hay riesgo de inyección SQL.
     const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
         SELECT COUNT(*) as count
         FROM neon_auth.user
         WHERE role = 'merchant'
         `;
 
+    // `Number(...)` convierte el `BigInt` a número normal (necesario porque
+    // `JSON.stringify` lanza error con BigInt). `rows[0]?.count || 0` cubre
+    // que no haya fila; el `0n` (BigInt cero) también es falsy, y da 0 igual.
+    // Para cifras de usuarios, `Number` no pierde precisión.
     return Number(rows[0]?.count || 0);
   } catch (e) {
+    // El error queda en el log del servidor...
     console.error(e);
+    // ...y se devuelve 0 en vez de propagarlo (ver notas).
     return 0;
   }
 };
