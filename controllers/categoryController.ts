@@ -16,10 +16,11 @@ const getStore = (merchantId: string) => prisma.stores.findFirst({ where: { merc
  */
 export const getCategories = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { store_id, storeSlug } = req.query;
+    const { store_id, storeId, storeSlug } = req.query;
+    const rawStoreId = store_id ?? storeId;
     let targetStoreId: number | null = null;
 
-    // 1. Resolución de la tienda: busca por slug si está presente, o valida el store_id numérico
+    // 1. Resolución de la tienda: busca por slug si está presente, o valida el store_id / storeId numérico
     if (typeof storeSlug === 'string' && storeSlug) {
       const store = await prisma.stores.findUnique({ where: { slug: storeSlug }, select: { id: true } });
       if (!store) {
@@ -27,8 +28,8 @@ export const getCategories = async (req: Request, res: Response): Promise<void> 
         return;
       }
       targetStoreId = store.id;
-    } else if (store_id) {
-      targetStoreId = parseId(store_id);
+    } else if (rawStoreId) {
+      targetStoreId = parseId(rawStoreId);
     }
 
     if (!targetStoreId) {
@@ -45,7 +46,7 @@ export const getCategories = async (req: Request, res: Response): Promise<void> 
 
     // 3. Normalización: transforma el objeto anidado `_count.products` en un campo plano `product_count`
     const categories = list.map(({ _count, ...rest }) => ({ ...rest, product_count: _count.products }));
-    res.status(200).json({ success: true, data: categories });
+    res.status(200).json({ success: true, categories, data: categories });
   } catch (error) {
     console.error("getCategories error:", error);
     res.status(500).json({ success: false, message: 'Failed to fetch categories' });
