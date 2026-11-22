@@ -38,6 +38,7 @@ import { parseId, isEmail } from "../utils/validation.js";
  * largos dentro de la transacción).
  */
 const ORDER_STATUSES = ["placed", "pending", "processing", "shipped", "delivered", "cancelled"];
+const PAYMENT_STATUSES = ["pending", "paid", "failed", "refunded"];
 const MAX_LINE_ITEMS = 50;
 const MAX_QUANTITY = 100;
 
@@ -517,12 +518,22 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    // Nuevo estado pedido. `req.body?.status` es `any`, así que `includes`
-    // compila; un valor no string (número, objeto, undefined) simplemente
-    // no está en la lista y da 400.
-    const status = req.body?.status;
+    // Nuevo estado pedido: acepta tanto `status` como `order_status`.
+    const status = req.body?.status ?? req.body?.order_status;
+    const { tracking_number, payment_status } = req.body ?? {};
+
     if (!ORDER_STATUSES.includes(status)) {
       res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
+      return;
+    }
+
+    if (payment_status !== undefined && !PAYMENT_STATUSES.includes(payment_status)) {
+      res.status(400).json({ success: false, message: `payment_status must be one of: ${PAYMENT_STATUSES.join(", ")}` });
+      return;
+    }
+
+    if (tracking_number !== undefined && (typeof tracking_number !== "string" || tracking_number.length > 100)) {
+      res.status(400).json({ success: false, message: "tracking_number must be text of 100 characters or less" });
       return;
     }
 
@@ -572,8 +583,15 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
           }
         }
       }
-      // Cambia el estado. Si algo falló arriba, esto no llega a ejecutarse.
-      return tx.orders.update({ where: { id }, data: { order_status: status } });
+      // Cambia el estado y, opcionalmente, tracking_number y payment_status. Si algo falló arriba, esto no llega a ejecutarse.
+      return tx.orders.update({
+        where: { id },
+        data: {
+          order_status: status,
+          ...(payment_status !== undefined && { payment_status }),
+          ...(tracking_number !== undefined && { tracking_number: tracking_number.trim() || null }),
+        },
+      });
     });
 
     res.status(200).json({ success: true, message: `Order is now ${status}`, order: updated });

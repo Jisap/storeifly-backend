@@ -20,12 +20,12 @@
  * @returns `true` si es un string con URL válida y protocolo https.
  */
 export const isHttpsUrl = (value: unknown): value is string => {
-    if (typeof value !== "string") return false;
-    try {
-        return new URL(value).protocol === "https:";
-    } catch {
-        return false;
-    }
+  if (typeof value !== "string") return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -45,8 +45,8 @@ export const isHttpsUrl = (value: unknown): value is string => {
  *          Quien la llame debe comprobar el `null`.
  */
 export const parseId = (value: unknown): number | null => {
-    const n = Number(value);
-    return Number.isInteger(n) && n > 0 ? n : null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
 };
 
 /**
@@ -60,26 +60,47 @@ export const parseId = (value: unknown): number | null => {
  * @returns `true` si parece un email válido.
  */
 export const isEmail = (value: unknown): value is string =>
-    typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  typeof value === "string" && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 /**
  * Convierte un texto en un "slug": una versión apta para URLs (minúsculas,
- * sin símbolos y con guiones en lugar de espacios).
+ * sin tildes ni símbolos y con guiones en lugar de espacios).
  *
- * Ejemplo:
+ * Es la versión mejorada de la que había en `storeController`: añade el paso
+ * de normalización para que las tildes y la ñ se transliteren en vez de
+ * eliminarse.
+ *
+ * Ejemplos:
  *   "  Mi Tienda   Genial! " → "mi-tienda-genial"
+ *   "Café Ñandú"             → "cafe-nandu"   (antes daba "caf-and")
+ *   "Ropa  &  Calzado"       → "ropa-calzado"
+ *   "!!!"                    → ""             (hay que comprobarlo, ver notas)
  *
- * @param text - Texto de origen (por ejemplo, el nombre de una tienda o categoría).
- * @returns El slug generado (puede ser una cadena vacía si no contiene caracteres válidos).
+ * Pasos (en orden):
+ *  1. `toString()`: asegura que se trabaja con un string.
+ *  2. `normalize("NFD")`: descompone cada letra acentuada en letra base +
+ *     marca de acento ("é" → "e" + "´").
+ *  3. `replace(/[\u0300-\u036f]/g, "")`: elimina esas marcas de acento.
+ *  4. `toLowerCase()`: pasa todo a minúsculas.
+ *  5. `trim()`: quita espacios al inicio y al final.
+ *  6. `replace(/[^a-z0-9\s-]/g, "")`: elimina todo lo que no sea a-z, número,
+ *     espacio o guion.
+ *  7. `replace(/\s+/g, "-")`: convierte cada grupo de espacios en un guion.
+ *  8. `replace(/-+/g, "-")`: colapsa guiones repetidos en uno solo.
+ *  9. `replace(/^-|-$/g, "")`: quita guiones al principio y al final.
+ *
+ * @param text - Texto de origen (nombre de tienda, de categoría...).
+ * @returns El slug generado. Puede ser una cadena vacía; quien la llame debe
+ *          comprobarlo (como hacen `createStore` y `createCategory`).
  */
 export const generateSlug = (text: string): string =>
-    text
-        .toString()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .trim()
-        .replace(/[^a-z0-9\s-]/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
+  text
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
