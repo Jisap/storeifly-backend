@@ -20,7 +20,7 @@ const MAX_LINE_ITEMS = 50;
 const MAX_QUANTITY = 100;
 
 /**
- * Listas y límites para validar los datos de PEDIDOS que llegan del cliente.
+ * Estados de gestión de un pedido.
  *
  * - ORDER_STATUSES: ciclo de vida de un pedido:
  *     "placed"     → recién hecho.
@@ -569,29 +569,28 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
     }
 
     // TRANSACCIÓN: reponer stock y cambiar el estado se confirman juntos o
-    // se deshacen juntos. Así no puede quedar un pedido cancelado sin
-    // stock devuelto, ni stock devuelto con el pedido sin cancelar.
+    // se deshacen juntos.
     const updated = await prisma.$transaction(async (tx) => {
       if (status === "cancelled") {
-        // `items` es JSON en la BD: se comprueba que sea array. El
-        // `as any[]` es necesario porque Prisma lo tipa como JsonValue.
+        // RECLAMO ATÓMICO: solo UNA petición puede pasar de "no cancelado"
+        // a "cancelado". Si otra se adelantó, `count` es 0 y se aborta ANTES
+        // de reponer stock, evitando devolverlo dos veces.
+        const claimed = await tx.orders.updateMany({
+          where: { id, order_status: { not: "cancelled" } },
+          data: { order_status: "cancelled" },
+        });
+        if (claimed.count === 0) throw new CheckoutError("Cancelled orders can't be changed");
+
         const items = Array.isArray(order.items) ? (order.items as any[]) : [];
         for (const item of items) {
-          // Cada línea es la "foto" guardada en `createOrder`
-          // (`product_id`, `quantity`...). Se revalida por prudencia.
           const productId = parseId(item?.product_id);
           const quantity = Number(item?.quantity);
           if (productId && Number.isInteger(quantity) && quantity > 0) {
-            // `updateMany` (y no `update`) a propósito: si el producto
-            // se borró después de la compra, `update` lanzaría un error
-            // y bloquearía la cancelación; `updateMany` simplemente no
-            // afecta a ninguna fila. `increment` suma en la BD de forma
-            // atómica, sin leer el stock antes.
             await tx.products.updateMany({ where: { id: productId }, data: { stock: { increment: quantity } } });
           }
         }
       }
-      // Cambia el estado y, opcionalmente, tracking_number y payment_status. Si algo falló arriba, esto no llega a ejecutarse.
+      // Aplica el resto de cambios (estado, seguimiento y pago).
       return tx.orders.update({
         where: { id },
         data: {
@@ -604,6 +603,11 @@ export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response
 
     res.status(200).json({ success: true, message: `Order is now ${status}`, order: updated });
   } catch (error) {
+    // Pedido cancelado por otra petición simultánea.
+    if (error instanceof CheckoutError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
     // Detalle en el log del servidor; mensaje genérico al cliente.
     console.error("updateOrderStatus error:", error);
     res.status(500).json({ success: false, message: "Failed to update order status" });
