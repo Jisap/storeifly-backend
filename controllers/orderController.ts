@@ -2,6 +2,9 @@ import { Request, Response } from "express";
 import { randomBytes } from "node:crypto";
 import { prisma } from "../config/prisma.js";
 import { Prisma } from "../generated/prisma/client.js";
+import { AuthenticatedRequest } from "../middleware/auth.js";
+import { isNeonEmailVerified } from "../services/neonUser.js";
+import { parseId, isEmail } from "../utils/validation.js";
 
 /**
  * Clase `Decimal` de Prisma, extraída del namespace `Prisma`.
@@ -9,15 +12,12 @@ import { Prisma } from "../generated/prisma/client.js";
  * Sirve para hacer cálculos con dinero SIN los errores de redondeo de los
  * `number` de JavaScript (0.1 + 0.2 = 0.30000000000000004). Se usará para
  * sumar precios, envío y totales del pedido.
- *
- * Nota: esta línea está entre dos imports. Funciona (los imports se
- * "elevan" y se ejecutan primero), pero por orden conviene ponerla después
- * de todos ellos.
  */
 const { Decimal } = Prisma;
-import { AuthenticatedRequest } from "../middleware/auth.js";
-import { isNeonEmailVerified } from "../services/neonUser.js";
-import { parseId, isEmail } from "../utils/validation.js";
+
+// Límites para evitar pedidos absurdos o abusivos (cuerpos enormes, bucles largos en transacciones).
+const MAX_LINE_ITEMS = 50;
+const MAX_QUANTITY = 100;
 
 /**
  * Listas y límites para validar los datos de PEDIDOS que llegan del cliente.
@@ -31,11 +31,6 @@ import { parseId, isEmail } from "../utils/validation.js";
  *     "cancelled"  → cancelado.
  *   Ojo: "placed" y "pending" parecen solapados. Cuando veas el resto del
  *   código, anota qué diferencia hay entre ambos y quién usa cada uno.
- * - MAX_LINE_ITEMS: máximo de líneas (productos distintos) por pedido (50).
- * - MAX_QUANTITY: máximo de unidades por línea (100).
- *
- * Los límites evitan pedidos absurdos o abusivos (cuerpos enormes, bucles
- * largos dentro de la transacción).
  */
 const ORDER_STATUSES = ["placed", "pending", "processing", "shipped", "delivered", "cancelled"];
 
@@ -53,8 +48,6 @@ const ORDER_STATUSES = ["placed", "pending", "processing", "shipped", "delivered
  * pinta el dashboard (hoy solo distingue "paid" del resto).
  */
 const PAYMENT_STATUSES = ["pending", "paid", "failed", "refunded"];
-const MAX_LINE_ITEMS = 50;
-const MAX_QUANTITY = 100;
 
 /**
  * Error propio del proceso de compra (checkout).
@@ -248,7 +241,7 @@ const parseItems = (value: unknown): Map<number, number> | null => {
  * invitados), sino un middleware de "autenticación opcional" que rellene
  * `req.user` si hay sesión y deje pasar si no la hay.
  *
- * Ruta esperada: POST con body JSON:
+ * Ruta esperada: POST `/checkout` con body JSON:
  *   {
  *     "storeId": 3,                         // o "store_id"
  *     "customerName": "Ana Pérez",
@@ -411,7 +404,7 @@ export const createOrder = async (req: AuthenticatedRequest, res: Response): Pro
           discount: 0,
           total: subtotal.add(shippingCost),
           payment_method: paymentMethod,
-          // `status` no se envía: lo fija el valor por defecto del esquema.
+          // `order_status` y `payment_status` no se envían: los fija el valor @default del esquema ("placed" y "pending").
         },
       });
     });
@@ -523,6 +516,99 @@ export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response
  * payment_status o tracking_number inválidos, o pedido cancelado);
  * 404 (sin tienda o pedido ajeno/inexistente); 500.
  */
+export const updateOrderStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    // Id del pedido desde la URL (`parseId` devuelve null si no es un
+    // entero positivo).
+    const id = parseId(req.params.id);
+    if (!id) {
+      res.status(400).json({ success: false, message: "Invalid order id" });
+      return;
+    }
+
+    // Nuevo estado pedido: acepta tanto `status` como `order_status`.
+    const status = req.body?.status ?? req.body?.order_status;
+    const { tracking_number, payment_status } = req.body ?? {};
+
+    if (!ORDER_STATUSES.includes(status)) {
+      res.status(400).json({ success: false, message: `status must be one of: ${ORDER_STATUSES.join(", ")}` });
+      return;
+    }
+
+    if (payment_status !== undefined && !PAYMENT_STATUSES.includes(payment_status)) {
+      res.status(400).json({ success: false, message: `payment_status must be one of: ${PAYMENT_STATUSES.join(", ")}` });
+      return;
+    }
+
+    if (tracking_number !== undefined && (typeof tracking_number !== "string" || tracking_number.length > 100)) {
+      res.status(400).json({ success: false, message: "tracking_number must be text of 100 characters or less" });
+      return;
+    }
+
+    // Tienda del usuario autenticado (`!` asume que `requireAuth` ya corrió).
+    const store = await prisma.stores.findFirst({ where: { merchant_id: req.user!.id }, select: { id: true } });
+    if (!store) {
+      res.status(404).json({ success: false, message: "You have not created a store yet" });
+      return;
+    }
+
+    // COMPROBACIÓN DE PROPIEDAD: se busca por `id` Y `store_id`. Se
+    // seleccionan `order_status` (para la regla de cancelado) e `items`
+    // (para saber qué stock devolver).
+    const order = await prisma.orders.findFirst({ where: { id, store_id: store.id }, select: { id: true, order_status: true, items: true } });
+    if (!order) {
+      res.status(404).json({ success: false, message: "Order not found" });
+      return;
+    }
+
+    // Un pedido cancelado no admite más cambios. Esta comprobación es la
+    // que impide devolver el stock dos veces.
+    if (order.order_status === "cancelled") {
+      res.status(400).json({ success: false, message: "Cancelled orders can't be changed" });
+      return;
+    }
+
+    // TRANSACCIÓN: reponer stock y cambiar el estado se confirman juntos o
+    // se deshacen juntos. Así no puede quedar un pedido cancelado sin
+    // stock devuelto, ni stock devuelto con el pedido sin cancelar.
+    const updated = await prisma.$transaction(async (tx) => {
+      if (status === "cancelled") {
+        // `items` es JSON en la BD: se comprueba que sea array. El
+        // `as any[]` es necesario porque Prisma lo tipa como JsonValue.
+        const items = Array.isArray(order.items) ? (order.items as any[]) : [];
+        for (const item of items) {
+          // Cada línea es la "foto" guardada en `createOrder`
+          // (`product_id`, `quantity`...). Se revalida por prudencia.
+          const productId = parseId(item?.product_id);
+          const quantity = Number(item?.quantity);
+          if (productId && Number.isInteger(quantity) && quantity > 0) {
+            // `updateMany` (y no `update`) a propósito: si el producto
+            // se borró después de la compra, `update` lanzaría un error
+            // y bloquearía la cancelación; `updateMany` simplemente no
+            // afecta a ninguna fila. `increment` suma en la BD de forma
+            // atómica, sin leer el stock antes.
+            await tx.products.updateMany({ where: { id: productId }, data: { stock: { increment: quantity } } });
+          }
+        }
+      }
+      // Cambia el estado y, opcionalmente, tracking_number y payment_status. Si algo falló arriba, esto no llega a ejecutarse.
+      return tx.orders.update({
+        where: { id },
+        data: {
+          order_status: status,
+          ...(payment_status !== undefined && { payment_status }),
+          ...(tracking_number !== undefined && { tracking_number: tracking_number.trim() || null }),
+        },
+      });
+    });
+
+    res.status(200).json({ success: true, message: `Order is now ${status}`, order: updated });
+  } catch (error) {
+    // Detalle en el log del servidor; mensaje genérico al cliente.
+    console.error("updateOrderStatus error:", error);
+    res.status(500).json({ success: false, message: "Failed to update order status" });
+  }
+}
 
 /**
  * Controlador: devuelve el recibo de un pedido a partir de su número
@@ -542,7 +628,7 @@ export const getMerchantOrders = async (req: AuthenticatedRequest, res: Response
  * estado...) más los datos públicos de la tienda (`store`). Se OMITE
  * `customer_id` para no exponer el id interno de la cuenta del comprador.
  *
- * Ruta esperada: GET `/:orderNumber`, sin body.
+ * Ruta esperada: GET `/receipt/:orderNumber`, sin body.
  *
  * Respuestas:
  *  - 200: `{ success, order }` con `order.store` = `{ id, name, slug, logo_url, currency, accent_color }`.
