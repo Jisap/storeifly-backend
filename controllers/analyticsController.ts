@@ -92,12 +92,13 @@ export const getMerchantAnalytics = async (req: AuthenticatedRequest, res: Respo
       prisma.products.count({ where: { store_id: sid, stock: { lte: 5 } } }),
 
       // 7. Pedidos con solo los campos necesarios para la tabla del
-      //    panel (sin items, dirección ni teléfono).
+      //    panel (sin items, dirección ni teléfono). Limitado a los 5 más recientes.
       prisma.orders.findMany({
         where: { store_id: sid },
         orderBy: { created_at: "desc" },
+        take: 5,
         select: {
-          id: true, order_number: true, customer_name: true, customer_email: true, total: true, order_status: true, payment_status: true, created_at: true,
+          id: true, order_number: true, customer_name: true, customer_email: true, total: true, order_status: true, payment_status: true, payment_method: true, created_at: true,
         }
       })
     ])
