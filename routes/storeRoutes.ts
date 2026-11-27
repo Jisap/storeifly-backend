@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole, optionalAuth } from "../middleware/auth.js";
 import {
   createStore,
   onboardMerchant,
@@ -7,7 +7,9 @@ import {
   updateMyStore,
   getAllStores,
   getAllMerchants,
-  toggleStoreStatus
+  toggleStoreStatus,
+  getStoreBySlug,
+  getFeaturedStores
 } from "../controllers/storeController.js";
 
 /**
@@ -77,5 +79,10 @@ storeRouter.get("/admin/merchants", requireAuth, requireRole(["admin"]), getAllM
 // lee en el controlador con `req.params.id`. Se aceptan ambas rutas.
 storeRouter.patch("/:id/toggle-status", requireAuth, requireRole(["admin"]), toggleStoreStatus);
 storeRouter.patch("/admin/:id/status", requireAuth, requireRole(["admin"]), toggleStoreStatus);
+
+// ---- Rutas públicas de tiendas ----
+storeRouter.get("/public/featured", getFeaturedStores);
+storeRouter.get("/featured", getFeaturedStores);
+storeRouter.get("/slug/:slug", optionalAuth, getStoreBySlug);
 
 export default storeRouter;

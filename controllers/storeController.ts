@@ -671,3 +671,68 @@ export const toggleStoreStatus = async (req: AuthenticatedRequest, res: Response
     res.status(500).json({ success: false, message: "Failed to update store status" });
   }
 };
+
+/**
+ * Controlador (público): devuelve los datos de una tienda por su slug.
+ */
+export const getStoreBySlug = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const slug = typeof req.params.slug === "string" ? req.params.slug : undefined;
+    if (!slug) {
+      res.status(400).json({ success: false, message: "Store slug is required" });
+      return;
+    }
+
+    const store = await prisma.stores.findUnique({
+      where: { slug },
+    });
+
+    if (!store) {
+      res.status(404).json({ success: false, message: "Store not found" });
+      return;
+    }
+
+    const isOwnerOrAdmin = Boolean(
+      req.user &&
+      (req.user.role === "admin" || (store.merchant_id && req.user.id === store.merchant_id))
+    );
+
+    if (store.status === "suspended" && !isOwnerOrAdmin) {
+      res.status(403).json({ success: false, message: "This store is currently suspended by platform administration." });
+      return;
+    }
+
+    res.status(200).json({ success: true, store });
+  } catch (error) {
+    console.error("getStoreBySlug error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch store" });
+  }
+};
+
+/**
+ * Controlador (público): devuelve las tiendas activas más recientes para la landing page.
+ */
+export const getFeaturedStores = async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const stores = await prisma.stores.findMany({
+      where: { status: "active" },
+      orderBy: { created_at: "desc" },
+      take: 12,
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        logo_url: true,
+        banner_url: true,
+        description: true,
+        currency: true,
+        created_at: true,
+      },
+    });
+
+    res.status(200).json({ success: true, stores });
+  } catch (error) {
+    console.error("getFeaturedStores error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch featured stores" });
+  }
+};

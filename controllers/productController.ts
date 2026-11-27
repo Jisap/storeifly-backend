@@ -401,4 +401,173 @@ export const deleteProduct = async (req: AuthenticatedRequest, res: Response): P
     console.error("deleteProduct error:", error);
     res.status(500).json({ success: false, message: "Failed to delete product" });
   }
-}
+};
+
+/**
+ * Controlador: lista productos con soporte de filtros.
+ * Puede ser llamado por comerciantes (ven sus propios productos, incluidos borradores)
+ * o por clientes de una tienda pública (solo productos activos de tiendas activas).
+ */
+export const getProducts = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const storeSlug = req.query.storeSlug as string | undefined;
+    const storeIdParam = req.query.storeId as string | undefined;
+    const categoryIdParam = req.query.categoryId as string | undefined;
+    const statusParam = req.query.status as string | undefined;
+    const searchParam = req.query.search as string | undefined;
+
+    let targetStoreId: number | null = null;
+    let targetStore: { id: number; status: string | null; merchant_id: string | null } | null = null;
+
+    if (storeSlug) {
+      targetStore = await prisma.stores.findUnique({
+        where: { slug: storeSlug },
+        select: { id: true, status: true, merchant_id: true },
+      });
+      if (!targetStore) {
+        res.status(404).json({ success: false, message: "Store not found" });
+        return;
+      }
+      targetStoreId = targetStore.id;
+    } else if (storeIdParam) {
+      const parsedStoreId = parseId(storeIdParam);
+      if (!parsedStoreId) {
+        res.status(400).json({ success: false, message: "Invalid storeId" });
+        return;
+      }
+      targetStore = await prisma.stores.findUnique({
+        where: { id: parsedStoreId },
+        select: { id: true, status: true, merchant_id: true },
+      });
+      if (!targetStore) {
+        res.status(404).json({ success: false, message: "Store not found" });
+        return;
+      }
+      targetStoreId = targetStore.id;
+    } else if (req.user?.id) {
+      // Si el comerciante está autenticado y no pasa storeId/storeSlug, busca su tienda
+      targetStore = await prisma.stores.findFirst({
+        where: { merchant_id: req.user.id },
+        select: { id: true, status: true, merchant_id: true },
+      });
+      if (targetStore) {
+        targetStoreId = targetStore.id;
+      }
+    }
+
+    if (!targetStoreId) {
+      res.status(400).json({ success: false, message: "A valid storeId, storeSlug, or merchant session is required" });
+      return;
+    }
+
+    // Comprobamos si quien consulta es el dueño de la tienda o un admin
+    const isOwnerOrAdmin = Boolean(
+      req.user &&
+      (req.user.role === "admin" || (targetStore?.merchant_id && req.user.id === targetStore.merchant_id))
+    );
+
+    // Si la tienda está suspendida y quien consulta no es dueño ni admin, denegar
+    if (targetStore?.status === "suspended" && !isOwnerOrAdmin) {
+      res.status(403).json({ success: false, message: "This store is currently suspended by platform administration." });
+      return;
+    }
+
+    // Construcción del filtro WHERE
+    const where: any = { store_id: targetStoreId };
+
+    if (statusParam) {
+      where.status = statusParam;
+    } else if (!isOwnerOrAdmin) {
+      // Público solo ve productos activos
+      where.status = "active";
+    }
+
+    if (categoryIdParam) {
+      const parsedCatId = parseId(categoryIdParam);
+      if (parsedCatId) {
+        where.category_id = parsedCatId;
+      }
+    }
+
+    if (searchParam && searchParam.trim()) {
+      const s = searchParam.trim();
+      where.OR = [
+        { name: { contains: s, mode: "insensitive" } },
+        { description: { contains: s, mode: "insensitive" } },
+        { sku: { contains: s, mode: "insensitive" } },
+      ];
+    }
+
+    const items = await prisma.products.findMany({
+      where,
+      orderBy: { created_at: "desc" },
+      include: {
+        categories: { select: { name: true, slug: true } },
+      },
+    });
+
+    const products = items.map((p) => ({
+      ...p,
+      category_name: p.categories?.name ?? null,
+      category_slug: p.categories?.slug ?? null,
+      categories: undefined,
+    }));
+
+    res.status(200).json({ success: true, products });
+  } catch (error) {
+    console.error("getProducts error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch products" });
+  }
+};
+
+/**
+ * Controlador: obtiene un producto por ID con su tienda y categoría.
+ */
+export const getProductById = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) {
+      res.status(400).json({ success: false, message: "Invalid product id" });
+      return;
+    }
+
+    const item = await prisma.products.findUnique({
+      where: { id },
+      include: {
+        categories: { select: { name: true, slug: true } },
+        stores: { select: { id: true, name: true, slug: true, status: true, merchant_id: true } },
+      },
+    });
+
+    if (!item) {
+      res.status(404).json({ success: false, message: "Product not found" });
+      return;
+    }
+
+    const isOwnerOrAdmin = Boolean(
+      req.user &&
+      (req.user.role === "admin" || (item.stores?.merchant_id && req.user.id === item.stores.merchant_id))
+    );
+
+    if (item.stores?.status === "suspended" && !isOwnerOrAdmin) {
+      res.status(403).json({ success: false, message: "This store is currently suspended by platform administration." });
+      return;
+    }
+
+    const product = {
+      ...item,
+      category_name: item.categories?.name ?? null,
+      category_slug: item.categories?.slug ?? null,
+      store_name: item.stores?.name ?? null,
+      store_slug: item.stores?.slug ?? null,
+      store_status: item.stores?.status ?? null,
+      categories: undefined,
+      stores: undefined,
+    };
+
+    res.status(200).json({ success: true, product });
+  } catch (error) {
+    console.error("getProductById error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch product" });
+  }
+};
