@@ -470,9 +470,16 @@ export const getAllStores = async (_req: AuthenticatedRequest, res: Response): P
     // `include._count` hace que Prisma calcule el número de registros
     // relacionados (productos, pedidos, categorías) sin cargarlos
     // enteros; llegan en `store._count.products`, etc.
+    // También se incluyen los pedidos pagados no cancelados para calcular ingresos.
     const stores = await prisma.stores.findMany({
       orderBy: { created_at: "desc" },
-      include: { _count: { select: { products: true, orders: true, categories: true } } },
+      include: {
+        _count: { select: { products: true, orders: true, categories: true } },
+        orders: {
+          where: { payment_status: "paid", order_status: { not: "cancelled" } },
+          select: { total: true },
+        },
+      },
     });
 
     // Los comerciantes no están en las tablas de Prisma sino en Neon Auth,
@@ -485,15 +492,23 @@ export const getAllStores = async (_req: AuthenticatedRequest, res: Response): P
 
     res.status(200).json({
       success: true,
-      // Une cada tienda con los datos de su comerciante.
+      // Une cada tienda con los datos de su comerciante y métricas calculadas.
       stores: stores.map((s) => {
         // `users` funciona como diccionario indexado por id de usuario.
         // Si la tienda no tiene `merchant_id`, no se busca nada.
         const m = s.merchant_id ? users[s.merchant_id] : undefined;
-        // Se devuelve la tienda completa + solo los campos públicos del
-        // comerciante (id, nombre, email), nunca el objeto de usuario entero.
-        // Si no se encuentra (usuario borrado, etc.), `merchant: null`.
-        return { ...s, merchant: m ? { id: m.id, name: m.name, email: m.email } : null };
+        const totalRevenue = s.orders.reduce((acc, o) => acc + Number(o.total), 0);
+        const { orders, ...rest } = s;
+
+        return {
+          ...rest,
+          merchant: m ? { id: m.id, name: m.name, email: m.email } : null,
+          merchant_name: m?.name ?? null,
+          merchant_email: m?.email ?? null,
+          product_count: s._count?.products ?? 0,
+          order_count: s._count?.orders ?? 0,
+          total_revenue: totalRevenue,
+        };
       }),
     });
   } catch (error) {

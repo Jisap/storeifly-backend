@@ -71,12 +71,13 @@ export const getMerchantAnalytics = async (req: AuthenticatedRequest, res: Respo
       // 1. Total de pedidos de la tienda.
       prisma.orders.count({ where: { store_id: sid } }),
 
-      // 2. Agregado de pedidos PAGADOS: suma y media del total en una
+      // 2. Agregado de pedidos PAGADOS y no cancelados: suma y media del total en una
       //    sola consulta. Devuelve `{ _sum: { total }, _avg: { total } }`
       //    con valores `Decimal` o `null` (si no hay pedidos pagados).
       prisma.orders.aggregate({
-        where: { store_id: sid, payment_status: "paid" }, _sum:
-          { total: true }, _avg: { total: true }
+        where: { store_id: sid, payment_status: "paid", order_status: { not: "cancelled" } },
+        _sum: { total: true },
+        _avg: { total: true },
       }),
 
       // 3. Pedidos pendientes de gestionar (estado "placed").
@@ -180,18 +181,24 @@ export const getPlatformAnalytics = async (req: AuthenticatedRequest, res: Respo
       // 5. Total de pedidos de la plataforma.
       prisma.orders.count(),
 
-      // 6. Ingresos totales: suma de pedidos pagados.
-      prisma.orders.aggregate({ where: { payment_status: "paid" }, _sum: { total: true } }),
+      // 6. Ingresos totales: suma de pedidos pagados no cancelados.
+      prisma.orders.aggregate({
+        where: { payment_status: "paid", order_status: { not: "cancelled" } },
+        _sum: { total: true },
+      }),
 
       // 7. TODAS las tiendas, cada una con la lista de `total` de sus pedidos
       //    pagados y el contador de pedidos. Sirve para calcular el ranking
       //    en memoria (ver notas: es la parte costosa).
       prisma.stores.findMany({
         include: {
-          orders: { where: { payment_status: "paid" }, select: { total: true } },
+          orders: {
+            where: { payment_status: "paid", order_status: { not: "cancelled" } },
+            select: { total: true },
+          },
           _count: { select: { orders: true } },
-        }
-      })
+        },
+      }),
     ])
 
     // Ids de los comerciantes de todas las tiendas. `.filter(Boolean)` quita

@@ -74,7 +74,8 @@ storeRouter.get("/admin/all", requireAuth, requireRole(["admin"]), getAllStores)
 storeRouter.get("/admin/merchants", requireAuth, requireRole(["admin"]), getAllMerchants);
 
 // Activar/suspender una tienda. `:id` es el id numérico de la tienda y se
-// lee en el controlador con `req.params.id`.
+// lee en el controlador con `req.params.id`. Se aceptan ambas rutas.
 storeRouter.patch("/:id/toggle-status", requireAuth, requireRole(["admin"]), toggleStoreStatus);
+storeRouter.patch("/admin/:id/status", requireAuth, requireRole(["admin"]), toggleStoreStatus);
 
 export default storeRouter;
